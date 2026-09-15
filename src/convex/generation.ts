@@ -1,15 +1,19 @@
 "use node";
 
 // ---------------------------------------------------------------------------
-// Image-to-video generation actions (node runtime for fetch + polling).
+// OPTIONAL DIRECT PROVIDER — fal.ai queue adapter ("fal" provider).
 //
-// Flow:
-//   1. submitGeneration  — uploads context + submits to the fal.ai queue
-//   2. pollGeneration    — short status check, safe to call repeatedly
-//   3. cancelGeneration  — best-effort remote cancel + local fail
+// The default provider in this studio is the personal GPU worker (Google
+// Colab, $0 — see jobs.ts + worker.ts). This module keeps the earlier
+// fal.ai direct path working as an explicitly OPTIONAL alternative: it is
+// only used when the user has set FAL_KEY, and the UI labels it as costing
+// money. Provider selection stays swappable via environment variables:
+//   FAL_KEY                enables this provider (optional)
+//   VIDEO_MODEL            fal model id (default: wan 2.2 5b i2v)
+//   VIDEO_NEGATIVE_PROMPT  default negative prompt
+//   FAL_QUEUE_BASE_URL     queue base (default https://queue.fal.run)
 //
-// The DB is the source of truth, so polling resumes across reloads.
-// Provider is swappable via env (VIDEO_MODEL, FAL_QUEUE_BASE_URL).
+// No fake success paths: any provider error marks the job failed verbatim.
 // ---------------------------------------------------------------------------
 
 import { v } from "convex/values";
@@ -44,7 +48,7 @@ function falHeaders(): HeadersInit {
   const key = process.env.FAL_KEY;
   if (!key) {
     throw new Error(
-      "FAL_KEY is not configured. Add your fal.ai API key in the project's Keys / API keys tab (env var: FAL_KEY).",
+      "FAL_KEY is not configured. This provider is optional — add a fal.ai API key in the project's Keys / API keys tab, or use the default GPU worker instead.",
     );
   }
   return { Authorization: `Key ${key}`, "Content-Type": "application/json" };
@@ -59,189 +63,163 @@ async function falFetch(
     headers: { ...falHeaders(), ...(init.headers ?? {}) },
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    let detail = "";
+    try {
+      detail = (await res.text()).slice(0, 400);
+    } catch {
+      detail = res.statusText;
+    }
     throw new Error(
-      `Provider request failed (${res.status}): ${text.slice(0, 400)}`,
+      `fal.ai request failed (${res.status}): ${detail || res.statusText}`,
     );
   }
   return (await res.json()) as unknown;
 }
 
-interface FalSubmitResponse {
-  request_id?: string;
-}
-
-interface FalStatusResponse {
-  status: "IN_QUEUE" | "IN_PROGRESS" | "COMPLETED";
-  queue_position?: number;
-}
-
-interface FalVideoFile {
-  url?: string;
-  file_name?: string;
-  content_type?: string;
-}
-
-interface FalResultResponse {
-  video?: FalVideoFile;
-  seed?: number;
-}
-
 // ---------------------------------------------------------------------------
-// Actions
+// Actions — called by the legacy composer UI. Jobs live in the videos table
+// (providerJobId = fal request_id), matching the original flow.
 // ---------------------------------------------------------------------------
 
-// Submit the job to the provider queue. Fast — returns as soon as the
-// queue accepts the request.
+// Submit an image-to-video job to fal.ai and mark the job "processing".
 export const submitGeneration = action({
   args: { jobId: v.id("videos") },
   handler: async (ctx, args) => {
-    const job: VideoJob = await ctx.runQuery(internal.videos.getJobForUser, {
-      jobId: args.jobId,
-    });
-    if (job.providerJobId) {
-      return { providerJobId: job.providerJobId }; // idempotent re-submit
-    }
-    if (job.status !== "pending") {
-      throw new Error(`Job is already ${job.status}.`);
-    }
+    const job: VideoJob | null = await ctx.runQuery(
+      internal.videos.getVideoInternal,
+      { id: args.jobId },
+    );
+    if (!job) throw new Error("Job not found.");
+    if (job.status !== "pending")
+      throw new Error(`Job is not pending (current status: ${job.status}).`);
+    if (!job.sourceImageId)
+      throw new Error("Job has no source image.");
 
-    const model = job.model || getModelId();
-    const maxFrames = Number(process.env.VIDEO_MAX_FRAMES ?? 161);
+    const imageUrl = await ctx.runQuery(internal.videos.getStorageUrlInternal, {
+      storageId: job.sourceImageId,
+    });
+    if (!imageUrl) throw new Error("Source image URL unavailable.");
+
+    // Mark processing before the network call so the UI sees the truth even
+    // if the submit fails and we immediately mark failed below.
+    await ctx.runMutation(internal.videos.setVideoStatusInternal, {
+      id: job._id,
+      status: "processing",
+    });
 
     try {
-      const imageUrl = job.sourceImageId
-        ? await ctx.storage.getUrl(job.sourceImageId)
-        : null;
-      if (!imageUrl) throw new Error("Source image is no longer available.");
-
-      // Duration → frames (WAN: frame-driven at 24fps, bounded by model max).
-      const fps = 24;
-      const requested = job.durationSeconds ?? 5;
-      const rawFrames = Math.round(requested * fps);
-      const numFrames = Math.min(Math.max(rawFrames, 17), maxFrames);
-
-      const submitBody: Record<string, unknown> = {
-        image_url: imageUrl,
-        prompt: job.prompt,
-        negative_prompt: job.negativePrompt ?? getNegativePrompt(),
-        num_frames: numFrames,
-        frames_per_second: fps,
-        resolution: "720p",
-        aspect_ratio: job.aspectRatio,
-        num_inference_steps: 40,
-        enable_prompt_expansion: false,
-        enable_safety_checker: true,
-        enable_output_safety_checker: true,
-      };
-
-      const submitted = (await falFetch(`/${model}`, {
+      const submitted = (await falFetch(`/${getModelId()}`, {
         method: "POST",
-        body: JSON.stringify(submitBody),
-      })) as FalSubmitResponse;
+        body: JSON.stringify({
+          prompt: job.prompt,
+          negative_prompt: getNegativePrompt(),
+          image_url: imageUrl,
+          // enable_prompt_expansion off → the user's exact words reach the model
+          enable_prompt_expansion: false,
+        }),
+      })) as { request_id?: string; status?: string };
 
       if (!submitted?.request_id) {
-        throw new Error("Provider did not return a request id.");
+        throw new Error(
+          "fal.ai did not return a request_id — unexpected response from the queue.",
+        );
       }
 
-      await ctx.runMutation(internal.videos.setJobSubmitted, {
-        id: args.jobId,
+      await ctx.runMutation(internal.videos.setVideoStatusInternal, {
+        id: job._id,
+        status: "processing",
         providerJobId: submitted.request_id,
       });
-
-      return { providerJobId: submitted.request_id };
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Unknown submission error.";
-      await ctx.runMutation(internal.videos.setJobFailedInternal, {
-        id: args.jobId,
-        errorMessage: message,
+        err instanceof Error ? err.message : "fal.ai submission failed.";
+      await ctx.runMutation(internal.videos.setVideoStatusInternal, {
+        id: job._id,
+        status: "failed",
+        errorMessage: message.slice(0, 400),
       });
       throw err;
     }
   },
 });
 
-// Short status check. The client calls this on an interval while a job is
-// pending/processing; the DB stays authoritative so status survives reloads.
+// One short poll — safe to call repeatedly from the client.
 export const pollGeneration = action({
   args: { jobId: v.id("videos") },
   handler: async (ctx, args) => {
-    const job: VideoJob = await ctx.runQuery(internal.videos.getJobForUser, {
-      jobId: args.jobId,
-    });
-    if (job.status !== "processing" || !job.providerJobId) {
-      return { status: job.status }; // nothing to poll
-    }
+    const job: VideoJob | null = await ctx.runQuery(
+      internal.videos.getVideoInternal,
+      { id: args.jobId },
+    );
+    if (!job) throw new Error("Job not found.");
+    if (job.status !== "processing" || !job.providerJobId) return;
 
-    const model = job.model;
     try {
       const status = (await falFetch(
-        `/${model}/requests/${job.providerJobId}/status`,
-      )) as FalStatusResponse;
+        `/${getModelId()}/requests/${job.providerJobId}/status`,
+      )) as { status?: string; queue_position?: number };
 
-      if (status.status === "COMPLETED") {
+      if (status?.status === "COMPLETED") {
         const result = (await falFetch(
-          `/${model}/requests/${job.providerJobId}`,
-        )) as FalResultResponse;
-        const videoUrl = result?.video?.url;
+          `/${getModelId()}/requests/${job.providerJobId}`,
+        )) as { video?: { url?: string }; video_url?: string };
+        const videoUrl = result?.video?.url ?? result?.video_url;
         if (!videoUrl) {
           throw new Error(
-            "Generation finished but the provider returned no video file.",
+            "Generation finished but the provider returned no video URL.",
           );
         }
-        await ctx.runMutation(internal.videos.setJobCompleted, {
-          id: args.jobId,
+        await ctx.runMutation(internal.videos.setVideoStatusInternal, {
+          id: job._id,
+          status: "completed",
           videoUrl,
-          seed: result.seed,
+          seed: undefined,
         });
-        return { status: "completed" as const };
+      } else if (status?.status === "IN_QUEUE" || status?.status === "IN_PROGRESS") {
+        // Still working — nothing to persist; the row stays "processing".
+      } else if (status?.status && !["OK"].includes(status.status)) {
+        throw new Error(`Unexpected provider status: ${status.status}`);
       }
-
-      return {
-        status: status.status === "IN_PROGRESS" ? "processing" : "queued",
-        queuePosition: status.queue_position,
-      };
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Polling error.";
-      // Distinguish transient network errors from hard provider errors.
-      const transient =
-        /failed to fetch|networkerror|timeout|temporarily|econn/i.test(message);
-      if (!transient) {
-        await ctx.runMutation(internal.videos.setJobFailedInternal, {
-          id: args.jobId,
-          errorMessage: message,
+      // Transient network errors must not kill an in-flight render.
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes("fal.ai request failed")) {
+        await ctx.runMutation(internal.videos.setVideoStatusInternal, {
+          id: job._id,
+          status: "failed",
+          errorMessage: message.slice(0, 400),
         });
+        return;
       }
-      throw err;
+      // Otherwise swallow: next poll retries.
     }
   },
 });
 
+// Best-effort remote cancel + local failure marker.
 export const cancelGeneration = action({
   args: { jobId: v.id("videos") },
   handler: async (ctx, args) => {
-    const job: VideoJob = await ctx.runQuery(internal.videos.getJobForUser, {
-      jobId: args.jobId,
-    });
-    if (job.status !== "pending" && job.status !== "processing") {
-      throw new Error("Only pending or processing jobs can be cancelled.");
-    }
-
+    const job: VideoJob | null = await ctx.runQuery(
+      internal.videos.getVideoInternal,
+      { id: args.jobId },
+    );
+    if (!job) throw new Error("Job not found.");
     if (job.providerJobId) {
       try {
-        await fetch(
-          `${FAL_QUEUE_BASE}/${job.model}/requests/${job.providerJobId}/cancel`,
-          { method: "PUT", headers: falHeaders() },
-        );
+        await falFetch(`/${getModelId()}/requests/${job.providerJobId}/cancel`, {
+          method: "PUT",
+        });
       } catch {
-        // Best-effort: remote cancel failure must not block local cleanup.
+        // Remote cancel is best-effort; the local state is still corrected.
       }
     }
-
-    await ctx.runMutation(internal.videos.setJobFailedInternal, {
-      id: args.jobId,
-      errorMessage: "Cancelled by user.",
-    });
+    if (job.status === "pending" || job.status === "processing") {
+      await ctx.runMutation(internal.videos.setVideoStatusInternal, {
+        id: job._id,
+        status: "failed",
+        errorMessage: "Cancelled by user.",
+      });
+    }
   },
 });
