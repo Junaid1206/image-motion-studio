@@ -190,6 +190,44 @@ export const cancelJob = mutation({
 // Internal state transitions (called by the worker API in worker.ts).
 // ---------------------------------------------------------------------------
 
+// Oldest queued job for the GPU worker's claim poll. Runs as an internal
+// query because the httpAction ctx has no direct db access.
+export const getOldestQueuedJobInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    return await ctx.db
+      .query("jobs")
+      .withIndex("by_status", (q) => q.eq("status", "queued"))
+      .order("asc")
+      .first();
+  },
+});
+
+// Atomically flip a claimed job to "connecting" and record the event.
+// Returns false if the job was claimed/cancelled between query and patch.
+export const claimJobInternal = internalMutation({
+  args: { id: v.id("jobs") },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const job = await ctx.db.get(args.id);
+    if (!job || job.status !== "queued") return false;
+
+    await ctx.db.patch(args.id, {
+      status: "connecting",
+      workerStatus: "claimed by worker",
+      updatedAt: now,
+    });
+    await ctx.db.insert("workerEvents", {
+      jobId: args.id,
+      level: "info",
+      state: "connecting",
+      message: "Job claimed by GPU worker.",
+      at: now,
+    });
+    return true;
+  },
+});
+
 export const getJobByKeyInternal = internalQuery({
   args: { workerJobKey: v.string() },
   handler: async (ctx, args) => {

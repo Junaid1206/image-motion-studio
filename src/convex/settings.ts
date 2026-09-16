@@ -1,5 +1,10 @@
 import { v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import {
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+} from "./_generated/server";
 import { requireUserId } from "./shared";
 
 // ---------------------------------------------------------------------------
@@ -89,6 +94,53 @@ export const revokeWorkerToken = mutation({
     if (worker) {
       await ctx.db.patch(worker._id, { online: false, status: "offline" });
     }
+  },
+});
+
+// Internal: fetch the stored SHA-256 worker-token hash (null when revoked).
+// Used by the worker HTTP API — an httpAction ctx has no direct db access.
+export const getWorkerTokenHashInternal = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query("appSettings")
+      .withIndex("by_key", (q) => q.eq("key", TOKEN_KEY))
+      .first();
+    return row?.value ?? null;
+  },
+});
+
+// Internal: heartbeat upsert of the singleton workerState row. Only fields
+// explicitly supplied by the worker are changed; omitted fields keep their
+// previous value.
+export const upsertWorkerStateInternal = internalMutation({
+  args: {
+    online: v.boolean(),
+    status: v.string(),
+    gpuName: v.optional(v.string()),
+    vramGb: v.optional(v.number()),
+    loadedModel: v.optional(v.string()),
+    message: v.optional(v.string()),
+    lastSeenAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db.query("workerState").first();
+    const patch: Record<string, unknown> = {
+      online: args.online,
+      status: args.status,
+      lastSeenAt: args.lastSeenAt,
+    };
+    if (args.gpuName !== undefined) patch.gpuName = args.gpuName;
+    if (args.vramGb !== undefined) patch.vramGb = args.vramGb;
+    if (args.loadedModel !== undefined) patch.loadedModel = args.loadedModel;
+    if (args.message !== undefined) patch.message = args.message;
+
+    if (existing) {
+      await ctx.db.patch(existing._id, patch);
+    } else {
+      await ctx.db.insert("workerState", patch);
+    }
+    return existing?._id ?? null;
   },
 });
 

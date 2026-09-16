@@ -1,6 +1,14 @@
-import { v } from "convex/values";
-import { httpAction } from "./_generated/server";
+import { httpAction, type ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
+import {
+  getWorkerTokenHashInternal,
+  upsertWorkerStateInternal,
+} from "./settings";
+import {
+  getOldestQueuedJobInternal,
+  claimJobInternal,
+} from "./jobs";
 
 // ---------------------------------------------------------------------------
 // WORKER HTTP API — the protocol between this app and the remote GPU worker
@@ -18,6 +26,11 @@ import { internal } from "./_generated/api";
 // The worker uploads the MP4 (and optional JPEG thumbnail) DIRECTLY to
 // Convex storage using upload URLs included in the claim payload — the
 // video bytes never pass through a Convex function (20 MB HTTP limit).
+//
+// NOTE: httpAction ctx is an ActionCtx — it has runQuery/runMutation and
+// storage, but NO direct ctx.db. Every database read/write below therefore
+// goes through an internal query/mutation. (Direct ctx.db access here was
+// the cause of the original HTTP 500 on /worker_api/health.)
 // ---------------------------------------------------------------------------
 
 type WorkerBody = {
@@ -53,7 +66,7 @@ async function sha256Hex(input: string): Promise<string> {
 
 // Returns null if the token is valid, or a 401 Response if not.
 async function verifyToken(
-  ctx: any,
+  ctx: ActionCtx,
   token: unknown,
 ): Promise<Response | null> {
   if (typeof token !== "string" || token.length < 16) {
@@ -63,11 +76,11 @@ async function verifyToken(
     );
   }
   const hash = await sha256Hex(token);
-  const row = await ctx.db
-    .query("appSettings")
-    .withIndex("by_key", (q: any) => q.eq("key", "worker_token_hash"))
-    .first();
-  if (!row || row.value !== hash) {
+  const stored = (await ctx.runQuery(
+    internal.settings.getWorkerTokenHashInternal,
+    {},
+  )) as string | null;
+  if (!stored || stored !== hash) {
     return respond(
       { ok: false, error: "Invalid worker token. Issue a new one in Settings." },
       401,
@@ -101,7 +114,7 @@ export const workerIndex = httpAction(async () => {
 // ---------------------------------------------------------------------------
 // POST /worker_api/health — heartbeat. Upserts the singleton workerState row.
 // ---------------------------------------------------------------------------
-export const workerHealth = httpAction(async (ctx: any, req) => {
+export const workerHealth = httpAction(async (ctx, req) => {
   const body = await readJson(req);
   const denied = await verifyToken(ctx, body.token);
   if (denied) return denied;
@@ -110,57 +123,65 @@ export const workerHealth = httpAction(async (ctx: any, req) => {
     ? String(body.status)
     : "online";
 
-  const existing = await ctx.db.query("workerState").first();
-  const patch = {
+  const lastSeenAt = Date.now();
+  await ctx.runMutation(internal.settings.upsertWorkerStateInternal, {
     online: true,
     status,
-    gpuName: typeof body.gpuName === "string" ? body.gpuName.slice(0, 80) : undefined,
+    gpuName:
+      typeof body.gpuName === "string" ? body.gpuName.slice(0, 80) : undefined,
     vramGb: typeof body.vramGb === "number" ? body.vramGb : undefined,
     loadedModel:
-      typeof body.loadedModel === "string" ? body.loadedModel.slice(0, 120) : undefined,
-    message: typeof body.message === "string" ? body.message.slice(0, 300) : undefined,
-    lastSeenAt: Date.now(),
-  };
-  if (existing) {
-    await ctx.db.patch(existing._id, patch);
-  } else {
-    await ctx.db.insert("workerState", patch);
-  }
-  return respond({ ok: true, serverTime: patch.lastSeenAt });
+      typeof body.loadedModel === "string"
+        ? body.loadedModel.slice(0, 120)
+        : undefined,
+    message:
+      typeof body.message === "string" ? body.message.slice(0, 300) : undefined,
+    lastSeenAt,
+  });
+
+  return respond({ ok: true, serverTime: lastSeenAt });
 });
 
 // ---------------------------------------------------------------------------
 // POST /worker_api/claim — fetch the oldest queued job, if any.
 // The job moves to "connecting" atomically with the claim.
 // ---------------------------------------------------------------------------
-export const workerClaim = httpAction(async (ctx: any, req) => {
+export const workerClaim = httpAction(async (ctx, req) => {
   const body = await readJson(req);
   const denied = await verifyToken(ctx, body.token);
   if (denied) return denied;
 
-  const job = await ctx.db
-    .query("jobs")
-    .withIndex("by_status", (q: any) => q.eq("status", "queued"))
-    .order("asc")
-    .first();
+  const job = (await ctx.runQuery(
+    internal.jobs.getOldestQueuedJobInternal,
+    {},
+  )) as {
+    _id: Id<"jobs">;
+    workerJobKey?: string;
+    type: string;
+    prompt: string;
+    negativePrompt?: string;
+    model: string;
+    settings: {
+      durationSeconds: number;
+      aspectRatio: string;
+      resolution: string;
+      seed?: number;
+    };
+    inputImageId?: Id<"_storage">;
+  } | null;
 
   if (!job) return respond({ ok: true, job: null });
 
   if (!job.workerJobKey) return workerError("Job has no worker key.", 409);
 
-  const now = Date.now();
-  await ctx.db.patch(job._id, {
-    status: "connecting",
-    workerStatus: "claimed by worker",
-    updatedAt: now,
-  });
-  await ctx.db.insert("workerEvents", {
-    jobId: job._id,
-    level: "info",
-    state: "connecting",
-    message: "Job claimed by GPU worker.",
-    at: now,
-  });
+  const claimed = (await ctx.runMutation(internal.jobs.claimJobInternal, {
+    id: job._id,
+  })) as boolean;
+  if (!claimed) {
+    // The job left the queue between the read and the claim — report an
+    // empty queue so the worker polls again on its next interval.
+    return respond({ ok: true, job: null });
+  }
 
   // Fresh upload URLs for the worker to deposit results directly.
   const videoUploadUrl = await ctx.storage.generateUploadUrl();
@@ -195,16 +216,16 @@ export const workerClaim = httpAction(async (ctx: any, req) => {
 // ---------------------------------------------------------------------------
 // POST /worker_api/progress — status / progress / message updates.
 // ---------------------------------------------------------------------------
-export const workerProgress = httpAction(async (ctx: any, req) => {
+export const workerProgress = httpAction(async (ctx, req) => {
   const body = await readJson(req);
   const denied = await verifyToken(ctx, body.token);
   if (denied) return denied;
   if (typeof body.workerJobKey !== "string")
     return workerError("workerJobKey is required.");
 
-  const job = await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
+  const job = (await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
     workerJobKey: body.workerJobKey,
-  });
+  })) as { _id: Id<"jobs">; status: string } | null;
   if (!job) return workerError("Unknown workerJobKey.", 404);
 
   const status =
@@ -237,7 +258,7 @@ export const workerProgress = httpAction(async (ctx: any, req) => {
 // Expects videoStorageId (and optional thumbnailStorageId) already uploaded
 // via the upload URLs from /claim.
 // ---------------------------------------------------------------------------
-export const workerComplete = httpAction(async (ctx: any, req) => {
+export const workerComplete = httpAction(async (ctx, req) => {
   const body = await readJson(req);
   const denied = await verifyToken(ctx, body.token);
   if (denied) return denied;
@@ -246,13 +267,29 @@ export const workerComplete = httpAction(async (ctx: any, req) => {
   if (typeof body.videoStorageId !== "string")
     return workerError("videoStorageId is required (upload the MP4 first).");
 
-  const job = await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
+  const job = (await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
     workerJobKey: body.workerJobKey,
-  });
+  })) as {
+    _id: Id<"jobs">;
+    userId: Id<"users">;
+    status: string;
+    type: string;
+    prompt: string;
+    negativePrompt?: string;
+    model: string;
+    settings: {
+      durationSeconds: number;
+      aspectRatio: string;
+      resolution: string;
+      seed?: number;
+    };
+    inputImageId?: Id<"_storage">;
+  } | null;
   if (!job) return workerError("Unknown workerJobKey.", 404);
 
   // Sanity-check the storage object exists and belongs to this deployment.
-  const stored = await ctx.storage.get(body.videoStorageId as any);
+  const videoStorageId = body.videoStorageId as Id<"_storage">;
+  const stored = await ctx.storage.get(videoStorageId);
   if (!stored) return workerError("videoStorageId not found in storage.", 404);
 
   // Never overwrite a terminal state.
@@ -260,25 +297,30 @@ export const workerComplete = httpAction(async (ctx: any, req) => {
     return respond({ ok: true, ignored: true, jobStatus: job.status });
   }
 
-  const videoId = await ctx.runMutation(internal.videos.addVideoInternal, {
-    userId: job.userId,
-    type: job.type,
-    prompt: job.prompt,
-    negativePrompt: job.negativePrompt,
-    videoStorageId: body.videoStorageId as any,
-    thumbnailStorageId:
-      typeof body.thumbnailStorageId === "string"
-        ? (body.thumbnailStorageId as any)
-        : undefined,
-    model: job.model,
-    provider: "worker",
-    jobId: job._id,
-    durationSeconds: job.settings?.durationSeconds,
-    aspectRatio: job.settings?.aspectRatio,
-    resolution: job.settings?.resolution,
-    seed: typeof body.seed === "number" ? body.seed : job.settings?.seed,
-    sourceImageId: job.inputImageId,
-  });
+  const thumbnailStorageId =
+    typeof body.thumbnailStorageId === "string"
+      ? (body.thumbnailStorageId as Id<"_storage">)
+      : undefined;
+
+  const videoId = (await ctx.runMutation(
+    internal.videos.addVideoInternal,
+    {
+      userId: job.userId,
+      type: job.type,
+      prompt: job.prompt,
+      negativePrompt: job.negativePrompt,
+      videoStorageId,
+      thumbnailStorageId,
+      model: job.model,
+      provider: "worker",
+      jobId: job._id,
+      durationSeconds: job.settings?.durationSeconds,
+      aspectRatio: job.settings?.aspectRatio,
+      resolution: job.settings?.resolution,
+      seed: typeof body.seed === "number" ? body.seed : job.settings?.seed,
+      sourceImageId: job.inputImageId,
+    },
+  )) as Id<"videos">;
 
   await ctx.runMutation(internal.jobs.setJobVideoInternal, {
     id: job._id,
@@ -297,16 +339,16 @@ export const workerComplete = httpAction(async (ctx: any, req) => {
 // ---------------------------------------------------------------------------
 // POST /worker_api/fail — hard failure reported by the worker.
 // ---------------------------------------------------------------------------
-export const workerFail = httpAction(async (ctx: any, req) => {
+export const workerFail = httpAction(async (ctx, req) => {
   const body = await readJson(req);
   const denied = await verifyToken(ctx, body.token);
   if (denied) return denied;
   if (typeof body.workerJobKey !== "string")
     return workerError("workerJobKey is required.");
 
-  const job = await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
+  const job = (await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
     workerJobKey: body.workerJobKey,
-  });
+  })) as { _id: Id<"jobs">; status: string } | null;
   if (!job) return workerError("Unknown workerJobKey.", 404);
 
   const message =
@@ -329,16 +371,16 @@ export const workerFail = httpAction(async (ctx: any, req) => {
 // POST /worker_api/job-status — lets the worker see user cancellations so it
 // can abort an in-flight render.
 // ---------------------------------------------------------------------------
-export const workerJobStatus = httpAction(async (ctx: any, req) => {
+export const workerJobStatus = httpAction(async (ctx, req) => {
   const body = await readJson(req);
   const denied = await verifyToken(ctx, body.token);
   if (denied) return denied;
   if (typeof body.workerJobKey !== "string")
     return workerError("workerJobKey is required.");
 
-  const job = await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
+  const job = (await ctx.runQuery(internal.jobs.getJobByKeyInternal, {
     workerJobKey: body.workerJobKey,
-  });
+  })) as { _id: Id<"jobs">; status: string } | null;
   if (!job) return workerError("Unknown workerJobKey.", 404);
 
   return respond({
