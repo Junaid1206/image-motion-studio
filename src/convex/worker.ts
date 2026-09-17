@@ -39,6 +39,17 @@ type WorkerBody = {
   [k: string]: unknown;
 };
 
+// Models the Colab worker notebook can actually execute (mirrors the
+// notebook's MODEL_REPOS in worker/ims-worker.ipynb). The claim endpoint
+// refuses anything else so an incompatible job (e.g. an A14B checkpoint that
+// needs A100-class VRAM) is failed with a clear error instead of crashing the
+// render with the wrong pipeline.
+const COLAB_MODEL_IDS = new Set(["wan2.2-ti2v-5b", "wan2.1-t2v-1.3b"]);
+
+function isColabModel(model: string): boolean {
+  return COLAB_MODEL_IDS.has(model);
+}
+
 async function readJson(req: Request): Promise<WorkerBody> {
   try {
     return (await req.json()) as WorkerBody;
@@ -171,6 +182,20 @@ export const workerClaim = httpAction(async (ctx, req) => {
   } | null;
 
   if (!job) return respond({ ok: true, job: null });
+
+  // Runtime guard: never hand the worker a model it cannot execute. This
+  // catches legacy queued jobs created before model validation existed.
+  if (!isColabModel(job.model)) {
+    await ctx.runMutation(internal.jobs.claimJobInternal, { id: job._id });
+    await ctx.runMutation(internal.jobs.setJobStateInternal, {
+      id: job._id,
+      status: "failed",
+      errorMessage: `Model ${job.model} is not compatible with the Colab worker (needs A100-class VRAM). Use WAN 2.2 TI2V-5B for image → video.`,
+      eventLevel: "error",
+      eventMessage: `Rejected on claim: ${job.model} is not runnable on the free Colab T4 worker.`,
+    });
+    return respond({ ok: true, job: null });
+  }
 
   if (!job.workerJobKey) return workerError("Job has no worker key.", 409);
 

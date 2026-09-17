@@ -50,7 +50,12 @@ type ModelInfo = {
   type: "text" | "image";
   repo: string;
   note: string;
+  colab?: boolean;
 };
+
+// The Colab worker's executable image → video model. The frontend submits
+// this for every image job; the backend rejects anything else for Colab.
+const COLAB_DEFAULT_IMAGE_MODEL = "wan2.2-ti2v-5b";
 
 export default function Generate() {
   const config = useQuery(api.videos.getStudioConfig);
@@ -72,12 +77,19 @@ export default function Generate() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const models: ModelInfo[] = config?.models ?? [];
-  const visibleModels = models.filter((m) => m.type === mode);
+  // Only models the Colab T4 worker can actually run are offered — the
+  // A14B/14B checkpoints would be rejected server-side anyway.
+  const visibleModels = models.filter(
+    (m) => m.type === mode && m.colab !== false,
+  );
   const [modelId, setModelId] = useState<string>("");
   const effectiveModel =
     modelId && visibleModels.some((m) => m.id === modelId)
       ? modelId
-      : (visibleModels[0]?.id ?? "");
+      : // Default to the Colab TI2V-5B image model whenever it is offered.
+        (visibleModels.find((m) => m.id === COLAB_DEFAULT_IMAGE_MODEL)?.id ??
+          visibleModels[0]?.id ??
+          "");
 
   const workerOnline = config?.worker?.online ?? false;
   const activeJob = jobs.find((j) => ACTIVE.includes(j.status)) ?? null;
@@ -133,6 +145,7 @@ export default function Generate() {
         prompt: prompt.trim(),
         negativePrompt: negativePrompt.trim() || undefined,
         inputImageId,
+        provider: "colab",
         model: effectiveModel,
         durationSeconds: Number(duration),
         aspectRatio: aspect,
@@ -185,7 +198,7 @@ export default function Generate() {
         <span className="text-sm">
           {workerOnline
             ? `Worker online${config?.worker?.gpuName ? ` · ${config.worker.gpuName}` : ""}`
-            : "No GPU worker connected — jobs stay queued until you start the Colab worker"}
+            : "GPU worker offline — jobs stay queued until you start the Colab worker"}
         </span>
         {config?.worker?.loadedModel && (
           <Badge variant="outline" className="font-normal">

@@ -35,6 +35,9 @@ function isStatus(s: string): s is (typeof JOB_STATUSES)[number] {
 }
 
 // Create a job (text→video or image→video). Validation is server-side.
+// This job pipeline is the Colab-worker path: the job row carries a provider
+// snapshot ("colab"), and models the Colab worker cannot run (A14B / 14B) are
+// rejected here so they can never reach the queue.
 export const createJob = mutation({
   args: {
     type: v.string(), // "text" | "image"
@@ -42,6 +45,7 @@ export const createJob = mutation({
     negativePrompt: v.optional(v.string()),
     inputImageId: v.optional(v.id("_storage")),
     model: v.string(),
+    provider: v.optional(v.string()),
     durationSeconds: v.number(),
     aspectRatio: v.string(),
     resolution: v.string(),
@@ -49,6 +53,14 @@ export const createJob = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+
+    // Provider snapshot: only "colab" is valid for this pipeline. The fal
+    // provider has its own adapter and must not enqueue Colab-worker jobs.
+    const provider = args.provider === "fal" ? "fal" : "colab";
+    if (provider !== "colab")
+      throw new Error(
+        'This pipeline is the Colab-worker path. Provider must be "colab".',
+      );
 
     if (args.type !== "text" && args.type !== "image")
       throw new Error("Job type must be text or image.");
@@ -79,6 +91,7 @@ export const createJob = mutation({
       negativePrompt: args.negativePrompt?.trim() || undefined,
       inputImageId: args.type === "image" ? args.inputImageId : undefined,
       model: args.model,
+      provider,
       settings: {
         durationSeconds: args.durationSeconds,
         aspectRatio: args.aspectRatio,
@@ -95,7 +108,7 @@ export const createJob = mutation({
       jobId,
       level: "info",
       state: "queued",
-      message: `Job created (${args.type}→video, ${args.model}). Waiting for a worker.`,
+      message: `Job created (${args.type}→video, ${args.model}, ${provider}). Waiting for a worker.`,
       at: now,
     });
 

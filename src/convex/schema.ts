@@ -50,6 +50,9 @@ const schema = defineSchema(
 
       // model + generation settings (validated at creation)
       model: v.string(),
+      // provider snapshot at creation time — this jobs pipeline is the
+      // Colab-worker path ("colab"); fal has its own provider adapter
+      provider: v.optional(v.string()),
       settings: v.object({
         durationSeconds: v.number(),
         aspectRatio: v.string(),
