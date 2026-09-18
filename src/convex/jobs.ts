@@ -74,6 +74,18 @@ export const markHostedJobRunning = mutation({
   },
 });
 
+export const failHostedJob = mutation({
+  args: { id: v.id("jobs"), message: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const job = await ctx.db.get(args.id);
+    if (!job || job.userId !== userId) throw new Error("Job not found.");
+    const now = Date.now();
+    await ctx.db.patch(args.id, { status: "failed", errorMessage: args.message.slice(0, 1000), updatedAt: now });
+    await ctx.db.insert("workerEvents", { jobId: args.id, level: "error", state: "failed", message: args.message.slice(0, 500), at: now });
+  },
+});
+
 // Job detail for the signed-in user.
 export const getJob = query({
   args: { id: v.id("jobs") },
