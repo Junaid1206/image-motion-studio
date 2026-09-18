@@ -11,10 +11,10 @@ import {
 } from "./jobs";
 
 // ---------------------------------------------------------------------------
-// WORKER HTTP API — the protocol between this app and the remote GPU worker
-// (Google Colab). All endpoints are POST + JSON and authenticated with the
-// personal WORKER_TOKEN (verified by SHA-256 hash; the raw token is never
-// stored server-side).
+// WORKER HTTP API — the protocol between this app and the self-hosted GPU
+// worker (Google Colab). All endpoints are POST + JSON and authenticated with
+// the personal WORKER_TOKEN (verified by SHA-256 hash; the raw token is never
+// stored server-side). No paid APIs anywhere.
 //
 //   POST /worker_api/health        worker heartbeat / registration
 //   POST /worker_api/claim         worker polls for the next queued job
@@ -39,15 +39,15 @@ type WorkerBody = {
   [k: string]: unknown;
 };
 
-// Models the Colab worker notebook can actually execute (mirrors the
-// notebook's MODEL_REPOS in worker/ims-worker.ipynb). The claim endpoint
-// refuses anything else so an incompatible job (e.g. an A14B checkpoint that
-// needs A100-class VRAM) is failed with a clear error instead of crashing the
-// render with the wrong pipeline.
-const COLAB_MODEL_IDS = new Set(["wan2.2-ti2v-5b", "wan2.1-t2v-1.3b"]);
+// The only model the worker notebook (worker/ims-worker.ipynb) can execute:
+// WAN 2.2 TI2V-5B, 4-bit NF4, real image conditioning on a free T4. The
+// claim endpoint refuses anything else so an incompatible job (e.g. an A14B
+// checkpoint that needs A100-class VRAM) is failed with a clear error
+// instead of crashing the render with the wrong pipeline.
+const WORKER_MODEL_IDS = new Set(["wan2.2-ti2v-5b"]);
 
-function isColabModel(model: string): boolean {
-  return COLAB_MODEL_IDS.has(model);
+function isWorkerModel(model: string): boolean {
+  return WORKER_MODEL_IDS.has(model);
 }
 
 async function readJson(req: Request): Promise<WorkerBody> {
@@ -147,10 +147,14 @@ export const workerHealth = httpAction(async (ctx, req) => {
         : undefined,
     message:
       typeof body.message === "string" ? body.message.slice(0, 300) : undefined,
+    workerVersion:
+      typeof body.workerVersion === "string"
+        ? body.workerVersion.slice(0, 40)
+        : undefined,
     lastSeenAt,
   });
 
-  return respond({ ok: true, serverTime: lastSeenAt });
+  return respond({ ok: true, authenticated: true, serverTime: lastSeenAt });
 });
 
 // ---------------------------------------------------------------------------
@@ -185,12 +189,12 @@ export const workerClaim = httpAction(async (ctx, req) => {
 
   // Runtime guard: never hand the worker a model it cannot execute. This
   // catches legacy queued jobs created before model validation existed.
-  if (!isColabModel(job.model)) {
+  if (!isWorkerModel(job.model)) {
     await ctx.runMutation(internal.jobs.claimJobInternal, { id: job._id });
     await ctx.runMutation(internal.jobs.setJobStateInternal, {
       id: job._id,
       status: "failed",
-      errorMessage: `Model ${job.model} is not compatible with the Colab worker (needs A100-class VRAM). Use WAN 2.2 TI2V-5B for image → video.`,
+      errorMessage: `Model ${job.model} is not compatible with the GPU worker. Use WAN 2.2 TI2V-5B for image → video.`,
       eventLevel: "error",
       eventMessage: `Rejected on claim: ${job.model} is not runnable on the free Colab T4 worker.`,
     });
@@ -337,7 +341,7 @@ export const workerComplete = httpAction(async (ctx, req) => {
       videoStorageId,
       thumbnailStorageId,
       model: job.model,
-      provider: "worker",
+      provider: "colab",
       jobId: job._id,
       durationSeconds: job.settings?.durationSeconds,
       aspectRatio: job.settings?.aspectRatio,

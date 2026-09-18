@@ -38,7 +38,7 @@ export const getSettings = query({
 });
 
 // Issue a fresh token (or re-issue, invalidating the old one). Returns the
-// raw token exactly once.
+// raw token exactly once. 32 random bytes → 64 hex chars.
 export const issueWorkerToken = mutation({
   args: {},
   handler: async (ctx) => {
@@ -112,7 +112,7 @@ export const getWorkerTokenHashInternal = internalQuery({
 
 // Internal: heartbeat upsert of the singleton workerState row. Only fields
 // explicitly supplied by the worker are changed; omitted fields keep their
-// previous value.
+// previous value. A completed job's error is cleared here via clearError.
 export const upsertWorkerStateInternal = internalMutation({
   args: {
     online: v.boolean(),
@@ -122,6 +122,7 @@ export const upsertWorkerStateInternal = internalMutation({
     loadedModel: v.optional(v.string()),
     message: v.optional(v.string()),
     lastSeenAt: v.number(),
+    workerVersion: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db.query("workerState").first();
@@ -134,24 +135,27 @@ export const upsertWorkerStateInternal = internalMutation({
     if (args.vramGb !== undefined) patch.vramGb = args.vramGb;
     if (args.loadedModel !== undefined) patch.loadedModel = args.loadedModel;
     if (args.message !== undefined) patch.message = args.message;
+    if (args.workerVersion !== undefined) patch.workerVersion = args.workerVersion;
 
     if (existing) {
       await ctx.db.patch(existing._id, patch);
-    } else {
-      await ctx.db.insert("workerState", patch);
+      return existing._id;
     }
-    return existing?._id ?? null;
+    return await ctx.db.insert("workerState", patch);
   },
 });
 
-// Internal: the studio UI treats the worker as offline after a stale window;
-// this flips presence without waiting for the worker's own next heartbeat.
+// Internal: flip a worker to offline — but only if its last heartbeat is
+// genuinely older than `staleMs`. A live worker (heartbeat every ~60 s) is
+// never touched, so this can run from any path without flapping presence.
 export const markWorkerOfflineInternal = internalMutation({
-  args: {},
-  handler: async (ctx) => {
+  args: { staleMs: v.number() },
+  handler: async (ctx, args) => {
     const worker = await ctx.db.query("workerState").first();
-    if (worker && worker.online) {
-      await ctx.db.patch(worker._id, { online: false, status: "offline" });
-    }
+    if (!worker || !worker.online) return false;
+    if (worker.lastSeenAt !== undefined && Date.now() - worker.lastSeenAt < args.staleMs)
+      return false; // still fresh — leave it alone
+    await ctx.db.patch(worker._id, { online: false, status: "offline" });
+    return true;
   },
 });

@@ -73,6 +73,18 @@ function timeAgo(ts: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// Resolves the playable/downloadable source of a clip: a provider URL when
+// one exists, otherwise a short-lived URL for the worker-deposited MP4 in
+// Convex storage.
+function useVideoSrc(video: VideoRow | null): string | null {
+  const storageUrl = useQuery(
+    api.videos.getStorageUrl,
+    video?.videoStorageId ? { storageId: video.videoStorageId } : "skip",
+  );
+  if (!video) return null;
+  return video.videoUrl ?? storageUrl ?? null;
+}
+
 export default function Library() {
   const videos = useQuery(api.videos.listMyVideos) as VideoRow[] | undefined;
   const datasets = useQuery(api.datasets.listDatasets);
@@ -93,28 +105,33 @@ export default function Library() {
   const [newDatasetName, setNewDatasetName] = useState("");
   const [creatingDataset, setCreatingDataset] = useState(false);
 
-  const download = async (v: VideoRow) => {
-    if (!v.videoUrl && !v.videoStorageId) return;
-    try {
-      if (v.videoUrl) {
-        const res = await fetch(v.videoUrl);
-        if (!res.ok) throw new Error(`Download failed (${res.status}).`);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `image-motion-${v._id.slice(-8)}.mp4`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      } else if (v.videoStorageId) {
-        window.open(`/api/storage?id=${v.videoStorageId}`, "_blank");
-      }
-    } catch {
-      if (v.videoUrl) window.open(v.videoUrl, "_blank");
+  const download = async (v: VideoRow, src: string | null) => {
+    if (!src) {
+      toast.error("No video file available for this clip.");
+      return;
     }
-    toast("Download started.");
+    try {
+      const res = await fetch(src);
+      if (!res.ok) throw new Error(`Download failed (${res.status}).`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `image-motion-${v._id.slice(-8)}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast("Download started.");
+    } catch (err) {
+      // CORS or transient failure: fall back to opening the source directly.
+      window.open(src, "_blank");
+      toast(
+        err instanceof Error
+          ? `${err.message} — opened the file in a new tab instead.`
+          : "Opened the file in a new tab instead.",
+      );
+    }
   };
 
   const saveTitle = async () => {
@@ -199,7 +216,7 @@ export default function Library() {
               key={v._id}
               v={v}
               onPlay={() => setPlayerVideo(v)}
-              onDownload={() => void download(v)}
+              onDownload={(src) => void download(v, src)}
               onRename={() => {
                 setEditingTitle(v._id);
                 setTitleDraft(v.title ?? "");
@@ -230,9 +247,7 @@ export default function Library() {
               {playerVideo?.aspectRatio ?? "?"} · seed {playerVideo?.seed ?? "—"}
             </DialogDescription>
           </DialogHeader>
-          {playerVideo && (
-            <PlayerDialogBody video={playerVideo} />
-          )}
+          {playerVideo && <PlayerDialogBody video={playerVideo} />}
         </DialogContent>
       </Dialog>
 
@@ -369,11 +384,7 @@ export default function Library() {
 }
 
 function PlayerDialogBody({ video }: { video: VideoRow }) {
-  const storageUrl = useQuery(
-    api.videos.getStorageUrl,
-    video.videoStorageId ? { storageId: video.videoStorageId } : "skip",
-  );
-  const src = video.videoUrl ?? storageUrl ?? null;
+  const src = useVideoSrc(video);
   if (!src) {
     return (
       <p className="py-8 text-center text-sm text-muted-foreground">
@@ -406,13 +417,14 @@ function LibraryCard({
 }: {
   v: VideoRow;
   onPlay: () => void;
-  onDownload: () => void;
+  onDownload: (src: string | null) => void;
   onRename: () => void;
   onTags: () => void;
   onFavorite: () => void;
   onDelete: () => void;
   onDataset: () => void;
 }) {
+  const src = useVideoSrc(v);
   return (
     <div className="group flex flex-col overflow-hidden rounded-lg border border-border/70">
       <button
@@ -420,7 +432,18 @@ function LibraryCard({
         className="relative flex aspect-video cursor-pointer items-center justify-center bg-accent/30 hover:bg-accent/50"
       >
         {v.status === "completed" ? (
-          <Film className="size-6 text-muted-foreground" />
+          src ? (
+            <video
+              src={src}
+              muted
+              loop
+              playsInline
+              preload="metadata"
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            <Film className="size-6 text-muted-foreground" />
+          )
         ) : (
           <span className="text-xs text-destructive">{v.status}</span>
         )}
@@ -449,7 +472,7 @@ function LibraryCard({
               <DropdownMenuItem className="cursor-pointer" onClick={onPlay}>
                 Play
               </DropdownMenuItem>
-              <DropdownMenuItem className="cursor-pointer" onClick={onDownload}>
+              <DropdownMenuItem className="cursor-pointer" onClick={() => onDownload(src)}>
                 <Download className="mr-2 size-3.5" /> Download
               </DropdownMenuItem>
               <DropdownMenuItem className="cursor-pointer" onClick={onRename}>

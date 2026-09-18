@@ -5,7 +5,6 @@ import {
   mutation,
   query,
 } from "./_generated/server";
-import { internal } from "./_generated/api";
 import {
   requireUserId,
   assertOwner,
@@ -16,8 +15,8 @@ import {
 
 // ---------------------------------------------------------------------------
 // GENERATION JOB MANAGER
-// Jobs are created by the UI, picked up by the remote GPU worker through the
-// authenticated worker API (worker.ts), and streamed back here. Status is
+// Jobs are created by the UI, picked up by the self-hosted GPU worker through
+// the authenticated worker API (worker.ts), and streamed back here. Status is
 // always the real backend state — nothing is simulated.
 // ---------------------------------------------------------------------------
 
@@ -34,13 +33,13 @@ function isStatus(s: string): s is (typeof JOB_STATUSES)[number] {
   return (JOB_STATUSES as readonly string[]).includes(s);
 }
 
-// Create a job (text→video or image→video). Validation is server-side.
-// This job pipeline is the Colab-worker path: the job row carries a provider
-// snapshot ("colab"), and models the Colab worker cannot run (A14B / 14B) are
-// rejected here so they can never reach the queue.
+// Create a job (image→video). Validation is server-side. The single
+// generation path is the Colab-worker pipeline: the job row carries a
+// provider snapshot ("colab") and models the worker cannot run are rejected
+// here so they can never reach the queue.
 export const createJob = mutation({
   args: {
-    type: v.string(), // "text" | "image"
+    type: v.string(), // "image"
     prompt: v.string(),
     negativePrompt: v.optional(v.string()),
     inputImageId: v.optional(v.id("_storage")),
@@ -54,17 +53,16 @@ export const createJob = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
 
-    // Provider snapshot: only "colab" is valid for this pipeline. The fal
-    // provider has its own adapter and must not enqueue Colab-worker jobs.
-    const provider = args.provider === "fal" ? "fal" : "colab";
-    if (provider !== "colab")
+    // Legacy clients may still send "fal" — this pipeline is worker-only.
+    if (args.provider && args.provider !== "colab")
       throw new Error(
-        'This pipeline is the Colab-worker path. Provider must be "colab".',
+        'This studio generates through your own GPU worker. Provider must be "colab" — no paid API keys are used.',
       );
+    const provider = "colab";
 
-    if (args.type !== "text" && args.type !== "image")
-      throw new Error("Job type must be text or image.");
-    if (args.type === "image" && !args.inputImageId)
+    if (args.type !== "image")
+      throw new Error("Job type must be image (image → video).");
+    if (!args.inputImageId)
       throw new Error("Image → Video requires a source image.");
 
     const problem = validateJobInput({
@@ -77,11 +75,8 @@ export const createJob = mutation({
     });
     if (problem) throw new Error(problem);
 
-    if (args.inputImageId) {
-      const img = await ctx.db.system.get(args.inputImageId);
-      if (!img)
-        throw new Error("Uploaded image not found. Upload it again.");
-    }
+    const img = await ctx.db.system.get(args.inputImageId);
+    if (!img) throw new Error("Uploaded image not found. Upload it again.");
 
     const now = Date.now();
     const jobId = await ctx.db.insert("jobs", {
@@ -89,7 +84,7 @@ export const createJob = mutation({
       type: args.type,
       prompt: args.prompt.trim(),
       negativePrompt: args.negativePrompt?.trim() || undefined,
-      inputImageId: args.type === "image" ? args.inputImageId : undefined,
+      inputImageId: args.inputImageId,
       model: args.model,
       provider,
       settings: {
@@ -108,7 +103,7 @@ export const createJob = mutation({
       jobId,
       level: "info",
       state: "queued",
-      message: `Job created (${args.type}→video, ${args.model}, ${provider}). Waiting for a worker.`,
+      message: `Job created (image→video, ${args.model}). Waiting for a worker.`,
       at: now,
     });
 
@@ -196,6 +191,76 @@ export const cancelJob = mutation({
       message: "Cancelled by user.",
       at: now,
     });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// STALE-JOB REAPER — no job may stay stuck forever. A job is stale when it is
+// in a non-queued active state (connecting/loading_model/generating/
+// processing) and has not been touched by the worker for STALE_JOB_MS, or
+// when it has been queued far longer than any legitimate wait. Invoked every
+// 5 minutes by the /worker_api/cron/sweep housekeeping route (http.ts).
+// Queued jobs are expired with a readable message; claimed jobs are failed
+// with a readable message.
+// ---------------------------------------------------------------------------
+
+export const STALE_JOB_MS = 12 * 60 * 1000; // 12 min without a worker touch
+const MAX_QUEUE_WAIT_MS = 24 * 60 * 60 * 1000; // queued > 24 h → expired
+
+export const sweepStaleJobs = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    let expired = 0;
+    let reaped = 0;
+
+    const queued = await ctx.db
+      .query("jobs")
+      .withIndex("by_status", (q) => q.eq("status", "queued"))
+      .collect();
+    for (const job of queued) {
+      if (now - job.updatedAt <= MAX_QUEUE_WAIT_MS) continue;
+      expired++;
+      await ctx.db.patch(job._id, {
+        status: "failed",
+        errorMessage:
+          "No GPU worker claimed this job within 24 hours. Start the Colab worker and queue it again.",
+        updatedAt: now,
+      });
+      await ctx.db.insert("workerEvents", {
+        jobId: job._id,
+        level: "error",
+        state: "failed",
+        message: "Expired in the queue — no worker connected for 24 hours.",
+        at: now,
+      });
+    }
+
+    for (const status of ["connecting", "loading_model", "generating", "processing"] as const) {
+      const jobs = await ctx.db
+        .query("jobs")
+        .withIndex("by_status", (q) => q.eq("status", status))
+        .collect();
+      for (const job of jobs) {
+        if (now - job.updatedAt <= STALE_JOB_MS) continue;
+        reaped++;
+        await ctx.db.patch(job._id, {
+          status: "failed",
+          errorMessage:
+            "The GPU worker stopped responding mid-render. Start the worker again and queue a new job.",
+          updatedAt: now,
+        });
+        await ctx.db.insert("workerEvents", {
+          jobId: job._id,
+          level: "error",
+          state: "failed",
+          message: `Worker went silent during "${status}" — marked failed after 12 minutes without updates.`,
+          at: now,
+        });
+      }
+    }
+
+    return { expired, reaped };
   },
 });
 

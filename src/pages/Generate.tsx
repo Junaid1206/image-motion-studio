@@ -22,10 +22,8 @@ import {
   CheckCircle2,
   Clapperboard,
   Loader2,
-  Sparkles,
   Upload,
   X,
-  AlertTriangle,
 } from "lucide-react";
 
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
@@ -44,18 +42,9 @@ const STATUS_LABEL: Record<string, string> = {
 
 const ACTIVE = ["queued", "connecting", "loading_model", "generating", "processing"];
 
-type ModelInfo = {
-  id: string;
-  label: string;
-  type: "text" | "image";
-  repo: string;
-  note: string;
-  colab?: boolean;
-};
-
-// The Colab worker's executable image → video model. The frontend submits
-// this for every image job; the backend rejects anything else for Colab.
-const COLAB_DEFAULT_IMAGE_MODEL = "wan2.2-ti2v-5b";
+// The single model the self-hosted Colab T4 worker runs (WAN 2.2 TI2V-5B,
+// 4-bit, real image conditioning). The backend rejects everything else.
+const WORKER_MODEL = "wan2.2-ti2v-5b";
 
 export default function Generate() {
   const config = useQuery(api.videos.getStudioConfig);
@@ -64,7 +53,6 @@ export default function Generate() {
   const createJob = useMutation(api.jobs.createJob);
   const cancelJob = useMutation(api.jobs.cancelJob);
 
-  const [mode, setMode] = useState<"text" | "image">("text");
   const [prompt, setPrompt] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [duration, setDuration] = useState("5");
@@ -76,21 +64,6 @@ export default function Generate() {
   const [submitting, setSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const models: ModelInfo[] = config?.models ?? [];
-  // Only models the Colab T4 worker can actually run are offered — the
-  // A14B/14B checkpoints would be rejected server-side anyway.
-  const visibleModels = models.filter(
-    (m) => m.type === mode && m.colab !== false,
-  );
-  const [modelId, setModelId] = useState<string>("");
-  const effectiveModel =
-    modelId && visibleModels.some((m) => m.id === modelId)
-      ? modelId
-      : // Default to the Colab TI2V-5B image model whenever it is offered.
-        (visibleModels.find((m) => m.id === COLAB_DEFAULT_IMAGE_MODEL)?.id ??
-          visibleModels[0]?.id ??
-          "");
-
   const workerOnline = config?.worker?.online ?? false;
   const activeJob = jobs.find((j) => ACTIVE.includes(j.status)) ?? null;
   const latestCompleted = jobs.find((j) => j.status === "completed" && j.videoId) ?? null;
@@ -98,8 +71,7 @@ export default function Generate() {
   const canSubmit =
     !!config &&
     prompt.trim().length > 0 &&
-    effectiveModel !== "" &&
-    (mode === "text" || !!imageFile) &&
+    !!imageFile &&
     !submitting &&
     !activeJob;
 
@@ -127,26 +99,22 @@ export default function Generate() {
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      let inputImageId: Id<"_storage"> | undefined;
-      if (mode === "image" && imageFile) {
-        const uploadUrl = await generateUploadUrl();
-        const res = await fetch(uploadUrl, {
-          method: "POST",
-          headers: { "Content-Type": imageFile.type },
-          body: imageFile,
-        });
-        if (!res.ok) throw new Error(`Image upload failed (${res.status}).`);
-        const { storageId } = (await res.json()) as { storageId: string };
-        inputImageId = storageId as Id<"_storage">;
-      }
+      const uploadUrl = await generateUploadUrl();
+      const res = await fetch(uploadUrl, {
+        method: "POST",
+        headers: { "Content-Type": imageFile!.type },
+        body: imageFile,
+      });
+      if (!res.ok) throw new Error(`Image upload failed (${res.status}).`);
+      const { storageId } = (await res.json()) as { storageId: string };
 
       await createJob({
-        type: mode,
+        type: "image",
         prompt: prompt.trim(),
         negativePrompt: negativePrompt.trim() || undefined,
-        inputImageId,
+        inputImageId: storageId as Id<"_storage">,
         provider: "colab",
-        model: effectiveModel,
+        model: WORKER_MODEL,
         durationSeconds: Number(duration),
         aspectRatio: aspect,
         resolution,
@@ -182,7 +150,8 @@ export default function Generate() {
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold tracking-tight">Generate</h1>
         <p className="text-sm text-muted-foreground">
-          One prompt or one image in — one rendered clip out. Nothing here is simulated.
+          One image in — one rendered clip out, generated on your own GPU worker.
+          Nothing here is simulated.
         </p>
       </div>
 
@@ -210,76 +179,50 @@ export default function Generate() {
       <div className="mt-8 grid gap-10 lg:grid-cols-[440px_1fr]">
         {/* Composer */}
         <section className="flex flex-col gap-5">
-          {/* Mode tabs */}
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              variant={mode === "text" ? "default" : "outline"}
-              size="sm"
-              className="cursor-pointer"
-              onClick={() => setMode("text")}
-            >
-              <Sparkles className="mr-2 size-4" /> Text → Video
-            </Button>
-            <Button
-              variant={mode === "image" ? "default" : "outline"}
-              size="sm"
-              className="cursor-pointer"
-              onClick={() => setMode("image")}
-            >
-              <Upload className="mr-2 size-4" /> Image → Video
-            </Button>
-          </div>
-
           {/* Image upload */}
-          {mode === "image" && (
-            <div className="flex flex-col gap-2">
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-                Source image
-              </Label>
-              {imagePreview ? (
-                <div className="group relative overflow-hidden rounded-lg border border-border/70">
-                  <img src={imagePreview} alt="Source" className="max-h-56 w-full object-contain" />
-                  <button
-                    onClick={clearImage}
-                    className="absolute right-2 top-2 rounded-md border border-border/70 bg-background/90 p-1.5 text-muted-foreground hover:text-foreground"
-                    aria-label="Remove image"
-                  >
-                    <X className="size-4" />
-                  </button>
-                </div>
-              ) : (
+          <div className="flex flex-col gap-2">
+            <Label className="text-xs uppercase tracking-widest text-muted-foreground">
+              Source image
+            </Label>
+            {imagePreview ? (
+              <div className="group relative overflow-hidden rounded-lg border border-border/70">
+                <img src={imagePreview} alt="Source" className="max-h-56 w-full object-contain" />
                 <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="flex h-36 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border/70 text-sm text-muted-foreground hover:border-foreground/30 hover:text-foreground"
+                  onClick={clearImage}
+                  className="absolute right-2 top-2 rounded-md border border-border/70 bg-background/90 p-1.5 text-muted-foreground hover:text-foreground"
+                  aria-label="Remove image"
                 >
-                  <Upload className="size-5" />
-                  Click to upload (JPG / PNG / WEBP, max 8 MB)
+                  <X className="size-4" />
                 </button>
-              )}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                className="hidden"
-                onChange={(e) => pickFile(e.target.files?.[0])}
-              />
-            </div>
-          )}
+              </div>
+            ) : (
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex h-36 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border/70 text-sm text-muted-foreground hover:border-foreground/30 hover:text-foreground"
+              >
+                <Upload className="size-5" />
+                Click to upload (JPG / PNG / WEBP, max 8 MB)
+              </button>
+            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              className="hidden"
+              onChange={(e) => pickFile(e.target.files?.[0])}
+            />
+          </div>
 
           {/* Prompt */}
           <div className="flex flex-col gap-2">
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-              {mode === "text" ? "Prompt" : "Motion prompt"}
+              Motion prompt
             </Label>
             <Textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               rows={5}
-              placeholder={
-                mode === "text"
-                  ? "A cinematic drone shot flying over a futuristic city at night, volumetric fog, realistic lighting, slow camera movement"
-                  : "Slow cinematic push-in. Keep the subject exactly the same. Subtle fabric movement, dramatic soft lighting, premium dark background."
-              }
+              placeholder="Slow cinematic push-in. Keep the subject exactly the same. Subtle fabric movement, dramatic soft lighting, premium dark background."
               className="resize-none"
             />
             <p className="text-[11px] text-muted-foreground">
@@ -307,16 +250,12 @@ export default function Generate() {
               <Label className="text-xs uppercase tracking-widest text-muted-foreground">
                 Model
               </Label>
-              <Select value={effectiveModel} onValueChange={setModelId}>
+              <Select value={WORKER_MODEL} disabled>
                 <SelectTrigger className="cursor-pointer">
-                  <SelectValue placeholder="Select model" />
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {visibleModels.map((m) => (
-                    <SelectItem key={m.id} value={m.id} className="cursor-pointer">
-                      {m.label}
-                    </SelectItem>
-                  ))}
+                  <SelectItem value={WORKER_MODEL}>WAN 2.2 TI2V-5B</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -393,11 +332,11 @@ export default function Generate() {
           >
             {submitting ? (
               <>
-                <Loader2 className="size-4 animate-spin" /> Creating job…
+                <Loader2 className="size-4 animate-spin" /> Uploading & queueing…
               </>
             ) : (
               <>
-                <Clapperboard className="size-4" /> Queue generation
+                <Clapperboard className="size-4" /> Generate
               </>
             )}
           </Button>
@@ -422,11 +361,7 @@ export default function Generate() {
             <div className="rounded-lg border border-border/70 p-6">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-sm">
-                  {activeJob.status === "queued" ? (
-                    <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                  ) : (
-                    <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                  )}
+                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
                   {STATUS_LABEL[activeJob.status] ?? activeJob.status}
                 </div>
                 <Button
@@ -445,7 +380,7 @@ export default function Generate() {
               <div className="mt-4 flex items-center justify-between">
                 <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
                   <Badge variant="outline" className="font-normal">
-                    {activeJob.type === "text" ? "text→video" : "image→video"}
+                    image→video
                   </Badge>
                   <Badge variant="outline" className="font-normal">
                     {activeJob.model}
@@ -488,8 +423,12 @@ export default function Generate() {
 
 function LatestCompletedVideo({ videoId }: { videoId: Id<"videos"> }) {
   const video = useQuery(api.videos.getVideo, { id: videoId });
+  const storageUrl = useQuery(
+    api.videos.getStorageUrl,
+    video?.videoStorageId ? { storageId: video.videoStorageId } : "skip",
+  );
   if (!video) return null;
-  const src = video.videoUrl ?? null;
+  const src = video.videoUrl ?? storageUrl ?? null;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">

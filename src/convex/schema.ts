@@ -33,14 +33,14 @@ const schema = defineSchema(
     }).index("email", ["email"]), // index for the email. do not remove or modify
 
     // ------------------------------------------------------------------
-    // GENERATION JOBS — one row per generation attempt (text->video or
-    // image->video). The remote GPU worker updates these rows through an
-    // authenticated HTTP API; the UI subscribes reactively.
+    // GENERATION JOBS — one row per generation attempt (image→video).
+    // The remote GPU worker updates these rows through an authenticated
+    // HTTP API; the UI subscribes reactively.
     // ------------------------------------------------------------------
     jobs: defineTable({
       userId: v.id("users"),
 
-      // "text" | "image"
+      // "image" — this studio generates image→video
       type: v.string(),
       prompt: v.string(),
       negativePrompt: v.optional(v.string()),
@@ -51,7 +51,7 @@ const schema = defineSchema(
       // model + generation settings (validated at creation)
       model: v.string(),
       // provider snapshot at creation time — this jobs pipeline is the
-      // Colab-worker path ("colab"); fal has its own provider adapter
+      // self-hosted Colab-worker path ("colab"); no paid APIs are used
       provider: v.optional(v.string()),
       settings: v.object({
         durationSeconds: v.number(),
@@ -68,7 +68,7 @@ const schema = defineSchema(
 
       // opaque key the worker uses to address this job (not a Convex id)
       workerJobKey: v.optional(v.string()),
-      remoteJobId: v.optional(v.string()), // worker-side / provider-side id
+      remoteJobId: v.optional(v.string()), // worker-side id
 
       // set when the completed video has been deposited in the library
       videoId: v.optional(v.id("videos")),
@@ -91,20 +91,20 @@ const schema = defineSchema(
     videos: defineTable({
       userId: v.id("users"),
 
-      // "image" | "text" — how the clip was made
+      // "image" — how the clip was made
       type: v.string(),
       title: v.optional(v.string()),
       prompt: v.string(),
       negativePrompt: v.optional(v.string()),
 
-      // results (provider-hosted or storage-hosted MP4)
+      // results (worker-deposited MP4 in Convex storage)
       videoUrl: v.optional(v.string()),
       videoStorageId: v.optional(v.id("_storage")), // worker-deposited MP4
       thumbnailStorageId: v.optional(v.id("_storage")),
 
       model: v.string(),
-      provider: v.string(), // "worker" (default, $0) | "fal" (optional direct)
-      providerJobId: v.optional(v.string()), // provider-side request id (fal)
+      provider: v.string(), // "colab" — the self-hosted worker path
+      providerJobId: v.optional(v.string()),
       jobId: v.optional(v.id("jobs")), // originating job, if any
 
       durationSeconds: v.optional(v.number()),
@@ -144,6 +144,7 @@ const schema = defineSchema(
       loadedModel: v.optional(v.string()),
       message: v.optional(v.string()),
       lastSeenAt: v.optional(v.number()),
+      workerVersion: v.optional(v.string()), // notebook protocol version
     }),
 
     // Append-only diagnostics for job state transitions (worker + app).

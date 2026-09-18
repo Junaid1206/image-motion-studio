@@ -11,10 +11,8 @@
 import type * as auth from "../auth.js";
 import type * as auth_emailOtp from "../auth/emailOtp.js";
 import type * as datasets from "../datasets.js";
-import type * as generation from "../generation.js";
 import type * as http from "../http.js";
 import type * as jobs from "../jobs.js";
-import type * as providers from "../providers.js";
 import type * as settings from "../settings.js";
 import type * as shared from "../shared.js";
 import type * as users from "../users.js";
@@ -31,10 +29,8 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   "auth/emailOtp": typeof auth_emailOtp;
   datasets: typeof datasets;
-  generation: typeof generation;
   http: typeof http;
   jobs: typeof jobs;
-  providers: typeof providers;
   settings: typeof settings;
   shared: typeof shared;
   users: typeof users;

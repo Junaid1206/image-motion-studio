@@ -22,6 +22,7 @@ type WorkerState = {
   loadedModel?: string;
   message?: string;
   lastSeenAt?: number;
+  workerVersion?: string;
 };
 
 export default function Settings() {
@@ -72,7 +73,7 @@ export default function Settings() {
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground">
           Connect your personal Google Colab GPU worker. Everything stays $0 — no paid
-          APIs are required anywhere in this studio.
+          APIs or video-generation keys are required anywhere in this studio.
         </p>
       </div>
 
@@ -95,9 +96,10 @@ export default function Settings() {
           <div className="grid gap-1 text-xs text-muted-foreground">
             <span>GPU: {worker.gpuName ?? "—"}</span>
             <span>VRAM: {worker.vramGb ? `${worker.vramGb} GB` : "—"}</span>
-            <span>Loaded model: {worker.loadedModel ?? "—"}</span>
+            <span>Model: {worker.loadedModel ?? "—"}</span>
+            <span>Worker version: {worker.workerVersion ?? "—"}</span>
             <span>
-              Last seen:{" "}
+              Last heartbeat:{" "}
               {worker.lastSeenAt
                 ? `${Math.max(0, Math.round((Date.now() - worker.lastSeenAt) / 1000))}s ago`
                 : "never"}
@@ -124,7 +126,8 @@ export default function Settings() {
         </div>
         <p className="text-xs text-muted-foreground">
           The raw token is shown once at issue time and pasted into the Colab notebook.
-          The server stores only its SHA-256 hash. Never commit it anywhere.
+          The server stores only its SHA-256 hash — the raw token is never stored,
+          logged, or shown again. Never commit it anywhere.
         </p>
         {newToken && (
           <div className="flex items-center gap-2 rounded-md border border-border/70 bg-accent/30 px-3 py-2">
@@ -145,7 +148,7 @@ export default function Settings() {
         <div className="flex gap-2">
           <Button size="sm" className="cursor-pointer" disabled={issuing} onClick={() => void issue()}>
             {issuing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <KeyRound className="mr-2 size-4" />}
-            {settings?.workerTokenIssued ? "Re-issue token" : "Issue token"}
+            {settings?.workerTokenIssued ? "Regenerate token" : "Generate token"}
           </Button>
           {settings?.workerTokenIssued && (
             <Button
@@ -163,9 +166,13 @@ export default function Settings() {
       {/* Colab setup */}
       <section className="mt-6 flex flex-col gap-3 rounded-lg border border-border/70 p-5">
         <h2 className="text-sm font-semibold tracking-tight">Colab worker setup</h2>
+        <p className="text-xs text-muted-foreground">
+          One-time setup. After this, generating a video is just: upload an image →
+          click Generate.
+        </p>
         <ol className="flex flex-col gap-3 text-sm text-muted-foreground">
           <li>
-            <span className="font-medium text-foreground">1.</span> Issue a token above
+            <span className="font-medium text-foreground">1.</span> Generate a token above
             and copy it.
           </li>
           <li>
@@ -175,37 +182,36 @@ export default function Settings() {
             folder) in Google Colab — free tier is enough.
           </li>
           <li>
-            <span className="font-medium text-foreground">3.</span> Set the two secrets
-            in the first cell:
+            <span className="font-medium text-foreground">3.</span> Paste the two values
+            below into the notebook's first cell:
           </li>
         </ol>
         <div className="flex flex-col gap-2">
           <CopyRow label="Convex HTTP base" value={convexHttpUrl} />
           <CopyRow label="App URL (informational)" value={appUrl} />
-          <CopyRow label="Worker token" value={newToken ?? "(paste the token you issued)"} />
+          <CopyRow label="Worker token" value={newToken ?? "(paste the token you generated)"} />
         </div>
         <ol start={4} className="flex flex-col gap-3 text-sm text-muted-foreground">
           <li>
             <span className="font-medium text-foreground">4.</span> Run all cells. The
-            worker verifies the GPU, installs model dependencies and starts polling
-            this app for queued jobs.
+            worker verifies the GPU, installs dependencies, loads WAN 2.2 TI2V-5B and
+            starts polling this app for queued jobs.
           </li>
           <li>
-            <span className="font-medium text-foreground">5.</span> When the sidebar
-            shows <span className="font-mono text-xs">worker · online</span>, queue a
-            job from the Generate page.
+            <span className="font-medium text-foreground">5.</span> When this page shows
+            the worker <span className="font-mono text-xs">online</span>, queue a job from
+            the Generate page.
           </li>
           <li>
             <span className="font-medium text-foreground">6.</span> Keep the Colab tab
-            open while rendering. Free Colab disconnects on idle — the worker retries
-            transient drops, and jobs stay queued if it goes offline.
+            open while rendering. Free Colab disconnects on idle — jobs stay queued if it
+            goes offline, and stuck jobs are cleaned up automatically.
           </li>
         </ol>
         <Separator className="my-1" />
         <p className="text-[11px] text-muted-foreground">
-          Optional (costs money): a direct fal.ai provider is available if you set the
-          <span className="font-mono"> FAL_KEY </span> env var — it is never required.
-          The default path is your own Colab worker at $0.
+          No API keys, no paid services: generation runs entirely on your own free Colab
+          GPU with the open-source WAN 2.2 TI2V-5B model.
         </p>
       </section>
     </div>

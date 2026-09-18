@@ -24,19 +24,20 @@ export const ACTIVE_STATUSES = [
   "processing",
 ] as const;
 
-export const JOB_TYPES = ["text", "image"] as const;
+export const JOB_TYPES = ["image"] as const;
 
 export const ALLOWED_DURATIONS = [5, 10, 15, 25];
 export const ALLOWED_ASPECT_RATIOS = ["9:16", "16:9", "1:1"];
 export const ALLOWED_RESOLUTIONS = ["480p", "720p"];
 
-// Model registry. `colab` marks what the free Colab T4 worker can actually
-// execute (the worker notebook's MODEL_REPOS is the source of truth): A14B /
-// 14B checkpoints need A100-class VRAM and are rejected at job creation so a
-// Colab job can never be queued with a model the worker cannot run.
-// wan2.2-ti2v-5b is the default/only image → video model for the Colab
-// provider (TI2V = text+image → video; it conditions on the uploaded image
-// via WanImageToVideoPipeline's expand_timesteps first-frame path).
+// Model registry. The Colab worker notebook (worker/ims-worker.ipynb) is the
+// source of truth for what it can execute; only what it actually loads is
+// listed here. wan2.2-ti2v-5b is the default/only image → video model:
+// TI2V = text+image → video, conditioned on the uploaded image through
+// WanImageToVideoPipeline's expand_timesteps first-frame path, 4-bit NF4 on a
+// free T4. A14B/14B checkpoints need A100-class VRAM and are intentionally
+// absent — validateJobInput rejects them by name so old clients get a clear
+// message instead of an "unknown model".
 export const MODELS = [
   {
     id: "wan2.2-ti2v-5b",
@@ -45,45 +46,17 @@ export const MODELS = [
     repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
     maxDurationSeconds: 5,
     colab: true,
-    note: "Image → Video. Default for the Colab T4 worker — 4-bit NF4, real image conditioning.",
-  },
-  {
-    id: "wan2.2-t2v-a14b",
-    label: "WAN 2.2 T2V A14B",
-    type: "text" as const,
-    repo: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-    maxDurationSeconds: 5,
-    colab: false,
-    note: "Text → Video. Needs A100-class VRAM — rejected for Colab jobs.",
-  },
-  {
-    id: "wan2.2-i2v-a14b",
-    label: "WAN 2.2 I2V A14B",
-    type: "image" as const,
-    repo: "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
-    maxDurationSeconds: 5,
-    colab: false,
-    note: "Image → Video. Needs A100-class VRAM — rejected for Colab jobs; use TI2V-5B.",
-  },
-  {
-    id: "wan2.1-t2v-1.3b",
-    label: "WAN 2.1 T2V 1.3B (fast)",
-    type: "text" as const,
-    repo: "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
-    maxDurationSeconds: 5,
-    colab: true,
-    note: "Lightweight fallback — runs on a free T4.",
-  },
-  {
-    id: "wan2.1-i2v-480p",
-    label: "WAN 2.1 I2V 480p",
-    type: "image" as const,
-    repo: "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
-    maxDurationSeconds: 5,
-    colab: false,
-    note: "14B checkpoint — not runnable on a free Colab T4 worker; use TI2V-5B.",
+    note: "Image → Video on your own Colab T4 worker — 4-bit NF4, real image conditioning, $0.",
   },
 ];
+
+// Never runnable on the free Colab T4 worker; kept as named rejections.
+export const BLOCKED_MODEL_IDS = [
+  "wan2.2-i2v-a14b",
+  "wan2.2-t2v-a14b",
+  "wan2.1-i2v-480p",
+  "wan2.1-i2v-720p",
+] as const;
 
 export function isValidModel(model: string): boolean {
   return MODELS.some((m) => m.id === model);
@@ -106,11 +79,11 @@ export function validateJobInput(opts: {
     return "Prompt is too long (2000 character limit).";
   if (opts.negativePrompt && opts.negativePrompt.length > 1000)
     return "Negative prompt is too long (1000 character limit).";
-  if (!isValidModel(opts.model)) return "Unknown model.";
-  const model = MODELS.find((m) => m.id === opts.model);
-  if (model && model.colab === false) {
-    return `${model.label} is not compatible with the free Colab T4 worker. Use WAN 2.2 TI2V-5B for image → video.`;
+  if ((BLOCKED_MODEL_IDS as readonly string[]).includes(opts.model)) {
+    return `${opts.model} needs A100-class VRAM and cannot run on the free Colab T4 worker. Use WAN 2.2 TI2V-5B.`;
   }
+  if (!isValidModel(opts.model))
+    return `Unknown model "${opts.model}". The worker runs WAN 2.2 TI2V-5B.`;
   if (!ALLOWED_DURATIONS.includes(opts.durationSeconds))
     return "Duration must be 5, 10, 15 or 25 seconds.";
   if (!ALLOWED_ASPECT_RATIOS.includes(opts.aspectRatio))
@@ -118,6 +91,22 @@ export function validateJobInput(opts: {
   if (!ALLOWED_RESOLUTIONS.includes(opts.resolution))
     return "Resolution must be 480p or 720p.";
   return null;
+}
+
+// Human-readable error mapping for the UI (requirement 15). The worker and
+// backend store readable messages already; this normalizes the generic ones.
+export function friendlyJobError(message?: string): string {
+  if (!message) return "Video generation failed. Check worker logs in Jobs → Timeline.";
+  const m = message.toLowerCase();
+  if (m.includes("out of memory") || m.includes("oom") || m.includes("cuda error"))
+    return "GPU memory is insufficient for the current generation settings. Reduce resolution, frames, or inference steps.";
+  if (m.includes("worker") && m.includes("offline"))
+    return "GPU worker is offline. Start the configured worker to generate videos.";
+  if (m.includes("token") || m.includes("401") || m.includes("unauthorized"))
+    return "Worker authentication failed. Generate a new worker token in Settings.";
+  if (m.includes("model") && m.includes("load"))
+    return "WAN 2.2 TI2V-5B failed to load. Check the worker notebook output for the underlying error.";
+  return message;
 }
 
 /** Requires a signed-in user; returns their id or throws. */

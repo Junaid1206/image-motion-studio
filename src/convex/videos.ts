@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import {
   requireUserId,
   assertOwner,
@@ -14,11 +14,9 @@ import {
 // automatically; removal is always an explicit user action (which also
 // deletes the stored media).
 //
-// Two provider paths feed this table:
-//   • "worker" (default, $0): jobs.ts + worker.ts — Google Colab GPU worker
-//   • "fal"   (optional):     generation.ts — direct fal.ai queue (costs money)
-// The legacy image-to-video composer writes rows directly here with
-// status pending → processing → completed/failed.
+// The single generation path is the self-hosted Colab GPU worker ($0, no
+// API keys): jobs.ts creates the job, worker.ts streams it back, and the
+// worker deposits the finished MP4 here via addVideoInternal.
 // ---------------------------------------------------------------------------
 
 // Live list of the signed-in user's library.
@@ -52,7 +50,7 @@ export const getStorageUrl = query({
   },
 });
 
-// Studio-wide config for the UI: models, limits, worker + key presence.
+// Studio-wide config for the UI: models, limits, worker + token presence.
 export const getStudioConfig = query({
   args: {},
   handler: async (ctx) => {
@@ -68,22 +66,6 @@ export const getStudioConfig = query({
       resolutions: ALLOWED_RESOLUTIONS,
       worker: worker ?? null,
       workerTokenIssued: !!tokenRow,
-    };
-  },
-});
-
-// Legacy model config for the original composer (fal provider status).
-// VIDEO_MAX_FRAMES caps the model's max clip length (~161 frames ≈ 6.7s
-// for WAN 2.2 5B); only durations that fit the cap are enabled in the UI.
-export const getModelConfig = query({
-  args: {},
-  handler: async () => {
-    const maxFrames = Number(process.env.VIDEO_MAX_FRAMES ?? 161);
-    const fps = 24;
-    return {
-      model: process.env.VIDEO_MODEL ?? "fal-ai/wan/v2.2-5b/image-to-video",
-      keyConfigured: !!process.env.FAL_KEY,
-      maxDurationSeconds: Math.floor((maxFrames / fps) * 100) / 100,
     };
   },
 });
@@ -169,109 +151,8 @@ export const deleteVideo = mutation({
 });
 
 // ---------------------------------------------------------------------------
-// Legacy composer flow (fal direct provider — OPTIONAL, requires FAL_KEY).
-// Kept so the original image-to-video workflow continues to work unchanged.
+// Internal functions used by the worker HTTP API (worker.ts).
 // ---------------------------------------------------------------------------
-
-export const createJob = mutation({
-  args: {
-    prompt: v.string(),
-    durationSeconds: v.number(),
-    aspectRatio: v.string(),
-    sourceImageId: v.id("_storage"),
-  },
-  handler: async (ctx, args) => {
-    const userId = await requireUserId(ctx);
-
-    if (!args.prompt.trim()) throw new Error("Prompt is required.");
-    if (args.prompt.length > 2000)
-      throw new Error("Prompt is too long (2000 character limit).");
-    if (!ALLOWED_DURATIONS.includes(args.durationSeconds))
-      throw new Error("Duration must be 5, 10, 15 or 25 seconds.");
-    if (!ALLOWED_ASPECT_RATIOS.includes(args.aspectRatio))
-      throw new Error("Aspect ratio must be 9:16, 16:9 or 1:1.");
-
-    const img = await ctx.db.system.get(args.sourceImageId);
-    if (!img) throw new Error("Uploaded image not found. Upload it again.");
-
-    const now = Date.now();
-    return await ctx.db.insert("videos", {
-      userId,
-      type: "image",
-      prompt: args.prompt.trim(),
-      sourceImageId: args.sourceImageId,
-      durationSeconds: args.durationSeconds,
-      aspectRatio: args.aspectRatio,
-      model: process.env.VIDEO_MODEL ?? "fal-ai/wan/v2.2-5b/image-to-video",
-      provider: "fal",
-      status: "pending",
-      createdAt: now,
-      updatedAt: now,
-    });
-  },
-});
-
-export const markFailed = mutation({
-  args: { id: v.id("videos"), errorMessage: v.string() },
-  handler: async (ctx, args) => {
-    const userId = await requireUserId(ctx);
-    const row = assertOwner(await ctx.db.get(args.id), "Video");
-    if (row.userId !== userId) throw new Error("Video not found.");
-    if (row.status !== "pending" && row.status !== "processing") return;
-    await ctx.db.patch(args.id, {
-      status: "failed",
-      errorMessage: args.errorMessage.slice(0, 400),
-      updatedAt: Date.now(),
-    });
-  },
-});
-
-export const removeVideo = mutation({
-  args: { id: v.id("videos") },
-  handler: async (ctx, args) => {
-    const userId = await requireUserId(ctx);
-    const row = assertOwner(await ctx.db.get(args.id), "Video");
-    if (row.userId !== userId) throw new Error("Video not found.");
-    if (row.videoStorageId) await ctx.storage.delete(row.videoStorageId);
-    if (row.thumbnailStorageId) await ctx.storage.delete(row.thumbnailStorageId);
-    if (row.sourceImageId) await ctx.storage.delete(row.sourceImageId);
-    await ctx.db.delete(args.id);
-  },
-});
-
-// ---------------------------------------------------------------------------
-// Internal functions used by the provider adapters and the worker bridge.
-// ---------------------------------------------------------------------------
-
-// Status / result updates for the fal direct-provider flow.
-export const setVideoStatusInternal = internalMutation({
-  args: {
-    id: v.id("videos"),
-    status: v.string(),
-    errorMessage: v.optional(v.string()),
-    videoUrl: v.optional(v.string()),
-    providerJobId: v.optional(v.string()),
-    seed: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    const row = await ctx.db.get(args.id);
-    if (!row) return;
-    const patch: Record<string, unknown> = { updatedAt: Date.now() };
-    if (args.status !== undefined) patch.status = args.status;
-    if (args.errorMessage !== undefined) patch.errorMessage = args.errorMessage;
-    if (args.videoUrl !== undefined) patch.videoUrl = args.videoUrl;
-    if (args.providerJobId !== undefined) patch.providerJobId = args.providerJobId;
-    if (args.seed !== undefined) patch.seed = args.seed;
-    await ctx.db.patch(args.id, patch);
-  },
-});
-
-export const getStorageUrlInternal = internalQuery({
-  args: { storageId: v.id("_storage") },
-  handler: async (ctx, args) => {
-    return await ctx.storage.getUrl(args.storageId);
-  },
-});
 
 // Deposit a finished video into the library (called by the worker bridge).
 export const addVideoInternal = internalMutation({
@@ -299,25 +180,6 @@ export const addVideoInternal = internalMutation({
       status: "completed",
       createdAt: now,
       updatedAt: now,
-    });
-  },
-});
-
-export const getVideoInternal = internalQuery({
-  args: { id: v.id("videos") },
-  handler: async (ctx, args) => {
-    return await ctx.db.get(args.id);
-  },
-});
-
-// Attach a deposited MP4 to an existing row (fal direct-provider flow; the
-// worker path passes videoStorageId through addVideoInternal instead).
-export const setVideoStorageInternal = internalMutation({
-  args: { id: v.id("videos"), videoStorageId: v.id("_storage") },
-  handler: async (ctx, args) => {
-    await ctx.db.patch(args.id, {
-      videoStorageId: args.videoStorageId,
-      updatedAt: Date.now(),
     });
   },
 });
