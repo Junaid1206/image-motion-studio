@@ -61,6 +61,19 @@ export const createJob = mutation({
   },
 });
 
+export const markHostedJobRunning = mutation({
+  args: { id: v.id("jobs") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const job = await ctx.db.get(args.id);
+    if (!job || job.userId !== userId) throw new Error("Job not found.");
+    if (job.status !== "queued") return;
+    const now = Date.now();
+    await ctx.db.patch(args.id, { status: "generating", progress: 5, workerStatus: "hosted GPU generating", updatedAt: now });
+    await ctx.db.insert("workerEvents", { jobId: args.id, level: "info", state: "generating", message: "Hosted GPU generation started.", at: now });
+  },
+});
+
 // Job detail for the signed-in user.
 export const getJob = query({
   args: { id: v.id("jobs") },
