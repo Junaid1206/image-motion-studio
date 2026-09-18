@@ -19,7 +19,7 @@
 
 ## Setup (5 minutes)
 
-1. **Issue a worker token**: studio → Settings → *Worker token* → **Issue token**. Copy it immediately — it is shown only once.
+1. **Generate a worker token**: studio → Settings → *Worker token* → **Generate token**. Copy it immediately — it is shown only once.
 2. **Open the notebook in Colab**: go to [colab.research.google.com](https://colab.research.google.com) → *File → Upload notebook* → upload `worker/ims-worker.ipynb`.
 3. **Select a GPU**: *Runtime → Change runtime type → T4 GPU* (free tier is fine).
 4. **Fill in cell 1**:
@@ -31,7 +31,7 @@
 
 ## Rendering a video
 
-1. In the studio: Generate → upload an image → motion prompt → Queue generation
+1. In the studio: Generate → upload an image → motion prompt → Generate
 2. The notebook claims it within ~15 seconds and prints progress per diffusion step
 3. Expect **~5–10 minutes per 5-second clip** on a free T4 (20 diffusion steps + encode)
 4. The finished MP4 appears in the Library automatically
@@ -40,18 +40,20 @@
 
 - **Free Colab is on-demand**: sessions disconnect on idle or after ~hours of use. Jobs you queued while the worker was offline simply start when you next run the notebook — nothing is lost.
 - **One job at a time**: the worker claims the oldest queued job first.
-- **Keep the tab open** while rendering. If Colab dies mid-render, the job stays in an active state; cancel it from the Jobs page and re-queue.
-- **Model sizing**: WAN 2.2 TI2V-5B (~8 GB VRAM with tiled VAE) fits a free T4. The A14B/14B models in the registry need 16–24+ GB — they are listed for completeness but will OOM on free tier.
-- **Cancellation**: clicking Cancel in the studio sets the job to `cancelled`; the worker notices at its next job-status check and skips/discards the render.
+- **Keep the tab open** while rendering. If Colab dies mid-render, the job is marked failed automatically after 12 minutes without worker updates (no job stays stuck forever) — just re-queue it.
+- **Model sizing**: WAN 2.2 TI2V-5B (~8 GB VRAM with tiled VAE) fits a free T4. A14B/14B checkpoints are not offered anywhere in the studio — they need 16–24+ GB VRAM and are rejected at job creation.
+- **Resolution**: the worker renders at 480p on free T4 tier; 720p requests are clamped automatically.
+- **Cancellation**: clicking Cancel in the studio sets the job to `cancelled`; the worker notices between diffusion steps and discards the render.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| Cell 1 `401` | Wrong or revoked token — re-issue in Settings and paste the new one |
+| Cell 1 `401` | Wrong or revoked token — generate a new one in Settings and paste it |
 | Cell 1 connection error | Wrong `CONVEX_HTTP_BASE` — must be the `.convex.site` URL, not `.cloud` |
+| Cell 1 "CONFIG ERROR" | One of the three settings is missing/invalid — the message says exactly which |
 | Cell 2 raises "No GPU" | Runtime type is CPU — switch to T4 GPU and re-run |
-| OOM in cell 5 | Too high resolution or a 14B-class model — use 480p + the 5B model |
+| OOM in cell 5 | The worker already clamps to 480p/81 frames; if it still OOMs, restart the runtime and let the model reload fresh |
 | Studio shows worker offline | Notebook cell 5 not running (or Colab disconnected) — restart from cell 2 |
-| Job stuck "connecting" | The claim happened but the render died with the tab — cancel and re-queue |
+| Job marked failed after silence | The worker went silent mid-render (Colab died) — the studio swept it after 12 minutes; restart the worker and re-queue |
 | "Invalid job status" in a fail report | The job was cancelled or completed before the worker reported — this is expected and ignored |
