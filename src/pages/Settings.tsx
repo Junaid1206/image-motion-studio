@@ -72,7 +72,7 @@ export default function Settings() {
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground">
-          Connect your personal Google Colab GPU worker. Everything stays $0 — no paid
+          Connect your personal GPU (or CPU) worker. Everything stays $0 — no paid
           APIs or video-generation keys are required anywhere in this studio.
         </p>
       </div>
@@ -108,7 +108,7 @@ export default function Settings() {
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            No worker has ever connected. Follow the Colab setup below.
+            No worker has ever connected. Follow the worker setup below.
           </p>
         )}
       </section>
@@ -125,9 +125,9 @@ export default function Settings() {
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground">
-          The raw token is shown once at issue time and pasted into the Colab notebook.
-          The server stores only its SHA-256 hash — the raw token is never stored,
-          logged, or shown again. Never commit it anywhere.
+          The raw token is shown once at issue time and pasted into the worker
+          notebook. The server stores only its SHA-256 hash — the raw token is never
+          stored, logged, or shown again. Never commit it anywhere.
         </p>
         {newToken && (
           <div className="flex items-center gap-2 rounded-md border border-border/70 bg-accent/30 px-3 py-2">
@@ -163,9 +163,9 @@ export default function Settings() {
         </div>
       </section>
 
-      {/* Colab setup */}
+      {/* Worker setup */}
       <section className="mt-6 flex flex-col gap-3 rounded-lg border border-border/70 p-5">
-        <h2 className="text-sm font-semibold tracking-tight">Colab worker setup</h2>
+        <h2 className="text-sm font-semibold tracking-tight">Worker setup</h2>
         <p className="text-xs text-muted-foreground">
           One-time setup. After this, generating a video is just: upload an image →
           click Generate.
@@ -176,10 +176,15 @@ export default function Settings() {
             and copy it.
           </li>
           <li>
-            <span className="font-medium text-foreground">2.</span> Open the
-            <span className="font-medium text-foreground"> ims-worker.ipynb </span>
-            notebook (in this project's <code className="font-mono text-xs">worker/</code>{" "}
-            folder) in Google Colab — free tier is enough.
+            <span className="font-medium text-foreground">2.</span> Open one of the
+            worker notebooks from this project's <code className="font-mono text-xs">worker/</code>{" "}
+            folder in Google Colab:
+            <br />• <span className="font-medium text-foreground">ims-worker.ipynb</span> —
+            GPU runtime: runs WAN 2.2 TI2V-5B locally on the free T4 (best quality).
+            <br />• <span className="font-medium text-foreground">ims-cpu-worker.ipynb</span> —
+            CPU runtime: needs no GPU and no quota; it delegates inference to a
+            Hugging Face ZeroGPU Space running WAN image-to-video (note the Space's
+            API endpoint — cell 4 prints it).
           </li>
           <li>
             <span className="font-medium text-foreground">3.</span> Paste the two values
@@ -194,8 +199,9 @@ export default function Settings() {
         <ol start={4} className="flex flex-col gap-3 text-sm text-muted-foreground">
           <li>
             <span className="font-medium text-foreground">4.</span> Run all cells. The
-            worker verifies the GPU, installs dependencies, loads WAN 2.2 TI2V-5B and
-            starts polling this app for queued jobs.
+            GPU worker verifies the GPU, installs dependencies, loads WAN 2.2 TI2V-5B
+            and starts polling this app for queued jobs; the CPU worker connects to
+            your chosen Space instead. Both register as the same personal worker.
           </li>
           <li>
             <span className="font-medium text-foreground">5.</span> When this page shows
@@ -203,15 +209,16 @@ export default function Settings() {
             the Generate page.
           </li>
           <li>
-            <span className="font-medium text-foreground">6.</span> Keep the Colab tab
-            open while rendering. Free Colab disconnects on idle — jobs stay queued if it
-            goes offline, and stuck jobs are cleaned up automatically.
+            <span className="font-medium text-foreground">6.</span> Keep the notebook tab
+            open while rendering. Free runtimes disconnect on idle — jobs stay queued if
+            the worker goes offline, and stuck jobs are cleaned up automatically.
           </li>
         </ol>
         <Separator className="my-1" />
         <p className="text-[11px] text-muted-foreground">
-          No API keys, no paid services: generation runs entirely on your own free Colab
-          GPU with the open-source WAN 2.2 TI2V-5B model.
+          No API keys, no paid services: generation runs on your free Colab GPU with
+          the open-source WAN 2.2 TI2V-5B model — or, when GPU quota is exhausted, the
+          CPU worker can route the same jobs through a free Hugging Face Space.
         </p>
       </section>
     </div>
