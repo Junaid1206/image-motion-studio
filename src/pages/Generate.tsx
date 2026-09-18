@@ -17,6 +17,7 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { useRef, useState } from "react";
+import { Client, handle_file } from "@gradio/client";
 import {
   Ban,
   CheckCircle2,
@@ -30,9 +31,9 @@ const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MAX_BYTES = 8 * 1024 * 1024;
 
 const STATUS_LABEL: Record<string, string> = {
-  queued: "Queued — waiting for a worker",
-  connecting: "Connecting to worker",
-  loading_model: "Model loading",
+  queued: "Queued",
+  connecting: "Connecting to GPU",
+  loading_model: "Loading GPU model",
   generating: "Generating",
   processing: "Processing",
   completed: "Completed",
@@ -51,6 +52,8 @@ export default function Generate() {
   const jobs = useQuery(api.jobs.listMyJobs) ?? [];
   const generateUploadUrl = useMutation(api.videos.generateUploadUrl);
   const createJob = useMutation(api.jobs.createJob);
+  const markHostedJobRunning = useMutation(api.jobs.markHostedJobRunning);
+  const completeHostedJob = useMutation(api.videos.completeHostedJob);
   const cancelJob = useMutation(api.jobs.cancelJob);
 
   const [prompt, setPrompt] = useState("");
@@ -64,7 +67,7 @@ export default function Generate() {
   const [submitting, setSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const workerOnline = config?.worker?.online ?? false;
+  const workerOnline = true;
   const activeJob = jobs.find((j) => ACTIVE.includes(j.status)) ?? null;
   const latestCompleted = jobs.find((j) => j.status === "completed" && j.videoId) ?? null;
 
@@ -98,360 +101,50 @@ export default function Generate() {
   const submit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
+    let jobId: Id<"jobs"> | null = null;
     try {
       const uploadUrl = await generateUploadUrl();
-      const res = await fetch(uploadUrl, {
-        method: "POST",
-        headers: { "Content-Type": imageFile!.type },
-        body: imageFile,
-      });
+      const res = await fetch(uploadUrl, { method: "POST", headers: { "Content-Type": imageFile!.type }, body: imageFile });
       if (!res.ok) throw new Error(`Image upload failed (${res.status}).`);
       const { storageId } = (await res.json()) as { storageId: string };
 
-      await createJob({
-        type: "image",
-        prompt: prompt.trim(),
-        negativePrompt: negativePrompt.trim() || undefined,
-        inputImageId: storageId as Id<"_storage">,
-        provider: "colab",
-        model: WORKER_MODEL,
-        durationSeconds: Number(duration),
-        aspectRatio: aspect,
-        resolution,
-        seed: seed.trim() ? Number(seed) : undefined,
+      jobId = await createJob({
+        type: "image", prompt: prompt.trim(), negativePrompt: negativePrompt.trim() || undefined,
+        inputImageId: storageId as Id<"_storage">, provider: "hosted", model: WORKER_MODEL,
+        durationSeconds: Number(duration), aspectRatio: aspect, resolution, seed: seed.trim() ? Number(seed) : undefined,
       });
-      toast.success(
-        workerOnline
-          ? "Job queued — the worker will pick it up within seconds."
-          : "Job queued. It will start when your Colab worker connects.",
-      );
-      setPrompt("");
-      setNegativePrompt("");
-      setSeed("");
-      clearImage();
+      await markHostedJobRunning({ id: jobId });
+      toast.info("GPU generation started…");
+
+      const client = await Client.connect("alexcheng0072/wan27-free-video-generator");
+      const ratio = aspect === "16:9" ? "832x480" : aspect === "1:1" ? "640x640" : "480x832";
+      const submission = await client.submit("/generate_video", {
+        input_image: await handle_file(imageFile!),
+        prompt: prompt.trim(),
+        aspect_ratio: ratio,
+        duration_seconds: Number(duration),
+      });
+      const result = await submission.result();
+      const output = (result.data as unknown[])[0] as { url?: string; path?: string } | string;
+      const videoUrl = typeof output === "string" ? output : output?.url;
+      if (!videoUrl) throw new Error("Hosted GPU returned no video file.");
+
+      const videoRes = await fetch(videoUrl);
+      if (!videoRes.ok) throw new Error(`Generated video download failed (${videoRes.status}).`);
+      const videoBlob = await videoRes.blob();
+      const videoUploadUrl = await generateUploadUrl();
+      const videoUpload = await fetch(videoUploadUrl, {
+        method: "POST", headers: { "Content-Type": "video/mp4" }, body: videoBlob,
+      });
+      if (!videoUpload.ok) throw new Error(`Video upload failed (${videoUpload.status}).`);
+      const { storageId: videoStorageId } = (await videoUpload.json()) as { storageId: string };
+      await completeHostedJob({ jobId, videoStorageId: videoStorageId as Id<"_storage"> });
+      toast.success("Video generated and saved to Library.");
+      setPrompt(""); setNegativePrompt(""); setSeed(""); clearImage();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to create the job.");
+      toast.error(err instanceof Error ? err.message : "Generation failed.");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const cancel = async (id: Id<"jobs">) => {
-    try {
-      await cancelJob({ id });
-      toast("Job cancelled.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Cancel failed.");
-    }
-  };
-
-  return (
-    <div className="mx-auto w-full max-w-6xl px-6 py-10">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Generate</h1>
-        <p className="text-sm text-muted-foreground">
-          One image in — one rendered clip out, generated on your own GPU worker.
-          Nothing here is simulated.
-        </p>
-      </div>
-
-      {/* Worker status bar */}
-      <div className="mt-6 flex flex-wrap items-center gap-3 rounded-lg border border-border/70 px-4 py-3">
-        <span
-          className={
-            workerOnline
-              ? "h-2 w-2 rounded-full bg-emerald-500"
-              : "h-2 w-2 rounded-full bg-zinc-600"
-          }
-        />
-        <span className="text-sm">
-          {workerOnline
-            ? `Worker online${config?.worker?.gpuName ? ` · ${config.worker.gpuName}` : ""}`
-            : "GPU worker offline — jobs stay queued until you start the Colab worker"}
-        </span>
-        {config?.worker?.loadedModel && (
-          <Badge variant="outline" className="font-normal">
-            loaded: {config.worker.loadedModel}
-          </Badge>
-        )}
-      </div>
-
-      <div className="mt-8 grid gap-10 lg:grid-cols-[440px_1fr]">
-        {/* Composer */}
-        <section className="flex flex-col gap-5">
-          {/* Image upload */}
-          <div className="flex flex-col gap-2">
-            <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-              Source image
-            </Label>
-            {imagePreview ? (
-              <div className="group relative overflow-hidden rounded-lg border border-border/70">
-                <img src={imagePreview} alt="Source" className="max-h-56 w-full object-contain" />
-                <button
-                  onClick={clearImage}
-                  className="absolute right-2 top-2 rounded-md border border-border/70 bg-background/90 p-1.5 text-muted-foreground hover:text-foreground"
-                  aria-label="Remove image"
-                >
-                  <X className="size-4" />
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="flex h-36 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border/70 text-sm text-muted-foreground hover:border-foreground/30 hover:text-foreground"
-              >
-                <Upload className="size-5" />
-                Click to upload (JPG / PNG / WEBP, max 8 MB)
-              </button>
-            )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              className="hidden"
-              onChange={(e) => pickFile(e.target.files?.[0])}
-            />
-          </div>
-
-          {/* Prompt */}
-          <div className="flex flex-col gap-2">
-            <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-              Motion prompt
-            </Label>
-            <Textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={5}
-              placeholder="Slow cinematic push-in. Keep the subject exactly the same. Subtle fabric movement, dramatic soft lighting, premium dark background."
-              className="resize-none"
-            />
-            <p className="text-[11px] text-muted-foreground">
-              {prompt.length}/2000
-            </p>
-          </div>
-
-          {/* Negative prompt */}
-          <div className="flex flex-col gap-2">
-            <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-              Negative prompt (optional)
-            </Label>
-            <Textarea
-              value={negativePrompt}
-              onChange={(e) => setNegativePrompt(e.target.value)}
-              rows={2}
-              placeholder="deformed, distorted, extra limbs, flickering, scene change…"
-              className="resize-none"
-            />
-          </div>
-
-          {/* Settings */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="flex flex-col gap-2">
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-                Model
-              </Label>
-              <Select value={WORKER_MODEL} disabled>
-                <SelectTrigger className="cursor-pointer">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={WORKER_MODEL}>WAN 2.2 TI2V-5B</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-                Duration
-              </Label>
-              <Select value={duration} onValueChange={setDuration}>
-                <SelectTrigger className="cursor-pointer">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(config?.durations ?? [5]).map((d) => (
-                    <SelectItem key={d} value={String(d)} className="cursor-pointer">
-                      {d}s
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-                Aspect ratio
-              </Label>
-              <Select value={aspect} onValueChange={setAspect}>
-                <SelectTrigger className="cursor-pointer">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(config?.aspectRatios ?? ["9:16", "16:9", "1:1"]).map((a) => (
-                    <SelectItem key={a} value={a} className="cursor-pointer">
-                      {a}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-                Resolution
-              </Label>
-              <Select value={resolution} onValueChange={setResolution}>
-                <SelectTrigger className="cursor-pointer">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(config?.resolutions ?? ["480p", "720p"]).map((r) => (
-                    <SelectItem key={r} value={r} className="cursor-pointer">
-                      {r}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {/* Seed */}
-          <div className="flex flex-col gap-2">
-            <Label className="text-xs uppercase tracking-widest text-muted-foreground">
-              Seed (optional)
-            </Label>
-            <Input
-              value={seed}
-              onChange={(e) => setSeed(e.target.value.replace(/[^0-9]/g, ""))}
-              placeholder="Leave empty for a random seed"
-              inputMode="numeric"
-            />
-          </div>
-
-          <Button
-            onClick={() => void submit()}
-            disabled={!canSubmit}
-            className="w-full cursor-pointer gap-2"
-          >
-            {submitting ? (
-              <>
-                <Loader2 className="size-4 animate-spin" /> Uploading & queueing…
-              </>
-            ) : (
-              <>
-                <Clapperboard className="size-4" /> Generate
-              </>
-            )}
-          </Button>
-          {!workerOnline && (
-            <p className="text-center text-[11px] text-muted-foreground">
-              You can still queue jobs while the worker is offline — open Settings to
-              start the Colab worker.
-            </p>
-          )}
-        </section>
-
-        {/* Output / status */}
-        <section className="flex flex-col gap-8">
-          <div>
-            <h2 className="text-xl font-semibold tracking-tight">Job status</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Real backend state — updated live from the database.
-            </p>
-          </div>
-
-          {activeJob ? (
-            <div className="rounded-lg border border-border/70 p-6">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-sm">
-                  <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                  {STATUS_LABEL[activeJob.status] ?? activeJob.status}
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void cancel(activeJob._id)}
-                  className="cursor-pointer gap-2 text-muted-foreground"
-                >
-                  <Ban className="size-4" /> Cancel
-                </Button>
-              </div>
-              <Separator className="my-4" />
-              <p className="line-clamp-2 text-sm text-muted-foreground">
-                “{activeJob.prompt}”
-              </p>
-              <div className="mt-4 flex items-center justify-between">
-                <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                  <Badge variant="outline" className="font-normal">
-                    image→video
-                  </Badge>
-                  <Badge variant="outline" className="font-normal">
-                    {activeJob.model}
-                  </Badge>
-                  <Badge variant="outline" className="font-normal">
-                    {activeJob.settings.durationSeconds}s · {activeJob.settings.aspectRatio} ·{" "}
-                    {activeJob.settings.resolution}
-                  </Badge>
-                  {activeJob.settings.seed !== undefined && (
-                    <Badge variant="outline" className="font-normal">
-                      seed {activeJob.settings.seed}
-                    </Badge>
-                  )}
-                </div>
-              </div>
-              {activeJob.progress !== undefined && (
-                <Progress value={activeJob.progress} className="mt-4" />
-              )}
-              {activeJob.workerStatus && (
-                <p className="mt-3 font-mono text-[11px] text-muted-foreground">
-                  worker: {activeJob.workerStatus}
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className="flex h-36 items-center justify-center rounded-lg border border-dashed border-border/70 text-sm text-muted-foreground">
-              No active job. Queued jobs wait here for the worker.
-            </div>
-          )}
-
-          {/* Latest completed */}
-          {latestCompleted?.videoId && (
-            <LatestCompletedVideo videoId={latestCompleted.videoId} />
-          )}
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function LatestCompletedVideo({ videoId }: { videoId: Id<"videos"> }) {
-  const video = useQuery(api.videos.getVideo, { id: videoId });
-  const storageUrl = useQuery(
-    api.videos.getStorageUrl,
-    video?.videoStorageId ? { storageId: video.videoStorageId } : "skip",
-  );
-  if (!video) return null;
-  const src = video.videoUrl ?? storageUrl ?? null;
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium tracking-tight">Latest clip</h3>
-        <Badge variant="outline" className="gap-1 font-normal">
-          <CheckCircle2 className="size-3" /> completed
-        </Badge>
-      </div>
-      {src ? (
-        <video
-          key={video._id}
-          src={src}
-          controls
-          loop
-          muted
-          playsInline
-          className="w-full rounded-lg border border-border/70"
-        />
-      ) : (
-        <div className="flex h-36 items-center justify-center rounded-lg border border-dashed border-border/70 text-sm text-muted-foreground">
-          Preview available in the Library.
-        </div>
-      )}
-    </div>
-  );
-}
