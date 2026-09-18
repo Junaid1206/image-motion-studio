@@ -53,6 +53,7 @@ export default function Generate() {
   const generateUploadUrl = useMutation(api.videos.generateUploadUrl);
   const createJob = useMutation(api.jobs.createJob);
   const markHostedJobRunning = useMutation(api.jobs.markHostedJobRunning);
+  const failHostedJob = useMutation(api.jobs.failHostedJob);
   const completeHostedJob = useMutation(api.videos.completeHostedJob);
   const cancelJob = useMutation(api.jobs.cancelJob);
 
