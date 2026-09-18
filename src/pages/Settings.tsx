@@ -30,8 +30,8 @@ export default function Settings() {
           saves it automatically to your Library.
         </p>
         <div className="grid gap-2 text-xs text-muted-foreground">
-          <span>Model: {config?.models?.[0]?.name ?? "WAN 2.2 TI2V-5B"}</span>
-          <span>Durations: {(config?.durations ?? [2, 3, 5]).join("s, ")}s</span>
+          <span>Model: {config?.models?.[0]?.label ?? "WAN 2.2 TI2V-5B"}</span>
+          <span>Durations: {(config?.durations ?? [2, 3, 5]).join("s, ")}</span>
           <span>Aspect ratios: {(config?.aspectRatios ?? ["9:16", "16:9", "1:1"]).join(" · ")}</span>
           <span>Local worker: not required</span>
           <span>Colab: not required</span>
