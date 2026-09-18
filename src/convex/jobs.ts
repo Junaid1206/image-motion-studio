@@ -33,80 +33,30 @@ function isStatus(s: string): s is (typeof JOB_STATUSES)[number] {
   return (JOB_STATUSES as readonly string[]).includes(s);
 }
 
-// Create a job (image→video). Validation is server-side. The single
-// generation path is the Colab-worker pipeline: the job row carries a
-// provider snapshot ("colab") and models the worker cannot run are rejected
-// here so they can never reach the queue.
+// Create a hosted GPU generation job. The browser dispatches the queued job to
+// Hugging Face ZeroGPU and deposits the resulting MP4 back into Convex storage.
 export const createJob = mutation({
   args: {
-    type: v.string(), // "image"
-    prompt: v.string(),
-    negativePrompt: v.optional(v.string()),
-    inputImageId: v.optional(v.id("_storage")),
-    model: v.string(),
-    provider: v.optional(v.string()),
-    durationSeconds: v.number(),
-    aspectRatio: v.string(),
-    resolution: v.string(),
-    seed: v.optional(v.number()),
+    type: v.string(), prompt: v.string(), negativePrompt: v.optional(v.string()),
+    inputImageId: v.optional(v.id("_storage")), model: v.string(), provider: v.optional(v.string()),
+    durationSeconds: v.number(), aspectRatio: v.string(), resolution: v.string(), seed: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-
-    // Legacy clients may still send "fal" — this pipeline is worker-only.
-    if (args.provider && args.provider !== "colab")
-      throw new Error(
-        'This studio generates through your own GPU worker. Provider must be "colab" — no paid API keys are used.',
-      );
-    const provider = "colab";
-
-    if (args.type !== "image")
-      throw new Error("Job type must be image (image → video).");
-    if (!args.inputImageId)
-      throw new Error("Image → Video requires a source image.");
-
-    const problem = validateJobInput({
-      prompt: args.prompt,
-      negativePrompt: args.negativePrompt,
-      model: args.model,
-      durationSeconds: args.durationSeconds,
-      aspectRatio: args.aspectRatio,
-      resolution: args.resolution,
-    });
+    if (args.provider && args.provider !== "hosted") throw new Error("This studio uses the hosted GPU generation service.");
+    if (args.type !== "image") throw new Error("Job type must be image (image → video).");
+    if (!args.inputImageId) throw new Error("Image → Video requires a source image.");
+    const problem = validateJobInput({ prompt: args.prompt, negativePrompt: args.negativePrompt, model: args.model, durationSeconds: args.durationSeconds, aspectRatio: args.aspectRatio, resolution: args.resolution });
     if (problem) throw new Error(problem);
-
-    const img = await ctx.db.system.get(args.inputImageId);
-    if (!img) throw new Error("Uploaded image not found. Upload it again.");
-
+    if (!(await ctx.db.system.get(args.inputImageId))) throw new Error("Uploaded image not found. Upload it again.");
     const now = Date.now();
     const jobId = await ctx.db.insert("jobs", {
-      userId,
-      type: args.type,
-      prompt: args.prompt.trim(),
-      negativePrompt: args.negativePrompt?.trim() || undefined,
-      inputImageId: args.inputImageId,
-      model: args.model,
-      provider,
-      settings: {
-        durationSeconds: args.durationSeconds,
-        aspectRatio: args.aspectRatio,
-        resolution: args.resolution,
-        seed: args.seed,
-      },
-      status: "queued",
-      workerJobKey: randomKey(),
-      createdAt: now,
-      updatedAt: now,
+      userId, type: args.type, prompt: args.prompt.trim(), negativePrompt: args.negativePrompt?.trim() || undefined,
+      inputImageId: args.inputImageId, model: args.model, provider: "hosted",
+      settings: { durationSeconds: args.durationSeconds, aspectRatio: args.aspectRatio, resolution: args.resolution, seed: args.seed },
+      status: "queued", workerJobKey: randomKey(), createdAt: now, updatedAt: now,
     });
-
-    await ctx.db.insert("workerEvents", {
-      jobId,
-      level: "info",
-      state: "queued",
-      message: `Job created (image→video, ${args.model}). Waiting for a worker.`,
-      at: now,
-    });
-
+    await ctx.db.insert("workerEvents", { jobId, level: "info", state: "queued", message: `Job created (image→video, ${args.model}). Hosted GPU generation queued.`, at: now });
     return jobId;
   },
 });
