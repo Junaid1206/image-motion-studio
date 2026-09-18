@@ -26,9 +26,9 @@ export const ACTIVE_STATUSES = [
 
 export const JOB_TYPES = ["image"] as const;
 
-export const ALLOWED_DURATIONS = [5, 10, 15, 25];
+export const ALLOWED_DURATIONS = [2, 3, 5];
 export const ALLOWED_ASPECT_RATIOS = ["9:16", "16:9", "1:1"];
-export const ALLOWED_RESOLUTIONS = ["480p", "720p"];
+export const ALLOWED_RESOLUTIONS = ["480p"];
 
 // Model registry. The Colab worker notebook (worker/ims-worker.ipynb) is the
 // source of truth for what it can execute; only what it actually loads is
@@ -45,12 +45,12 @@ export const MODELS = [
     type: "image" as const,
     repo: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
     maxDurationSeconds: 5,
-    colab: true,
-    note: "Image → Video on your own Colab T4 worker — 4-bit NF4, real image conditioning, $0.",
+    colab: false,
+    note: "Hosted GPU image → video — no local worker or Colab setup required.",
   },
 ];
 
-// Never runnable on the free Colab T4 worker; kept as named rejections.
+// Never runnable on the hosted GPU service; kept as named rejections.
 export const BLOCKED_MODEL_IDS = [
   "wan2.2-i2v-a14b",
   "wan2.2-t2v-a14b",
@@ -83,9 +83,9 @@ export function validateJobInput(opts: {
     return `${opts.model} needs A100-class VRAM and cannot run on the free Colab T4 worker. Use WAN 2.2 TI2V-5B.`;
   }
   if (!isValidModel(opts.model))
-    return `Unknown model "${opts.model}". The worker runs WAN 2.2 TI2V-5B.`;
+    return `Unknown model "${opts.model}". The hosted GPU service runs WAN 2.2 TI2V-5B.`;
   if (!ALLOWED_DURATIONS.includes(opts.durationSeconds))
-    return "Duration must be 5, 10, 15 or 25 seconds.";
+    return "Duration must be 2, 3 or 5 seconds.";
   if (!ALLOWED_ASPECT_RATIOS.includes(opts.aspectRatio))
     return "Aspect ratio must be 9:16, 16:9 or 1:1.";
   if (!ALLOWED_RESOLUTIONS.includes(opts.resolution))
