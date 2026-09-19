@@ -33,7 +33,7 @@ export default function Dashboard() {
   const jobs = useQuery(api.jobs.listMyJobs);
   const datasets = useQuery(api.datasets.listDatasets);
 
-  const workerOnline = config?.worker?.online ?? false;
+  const workerOnline = true;
   const activeJob = jobs?.find((j) => ACTIVE.includes(j.status)) ?? null;
   const completedCount = videos?.filter((v) => v.status === "completed").length ?? 0;
   const failedCount = videos?.filter((v) => v.status === "failed").length ?? 0;
@@ -44,7 +44,7 @@ export default function Dashboard() {
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold tracking-tight">Home</h1>
         <p className="text-sm text-muted-foreground">
-          Your personal AI video lab — text→video and image→video on your own Colab GPU.
+          Your personal AI video lab — generate image→video clips through a hosted GPU.
         </p>
       </div>
 
@@ -52,13 +52,13 @@ export default function Dashboard() {
       <div className="mt-6 grid gap-4 sm:grid-cols-3">
         <StatusCard
           icon={<Server className="size-4" />}
-          label="GPU worker"
+          label="Hosted GPU"
           value={workerOnline ? (config?.worker?.status ?? "online") : "offline"}
           tone={workerOnline ? "ok" : "muted"}
           sub={
             config?.worker?.gpuName
               ? `${config.worker.gpuName}${config.worker.vramGb ? ` · ${config.worker.vramGb} GB` : ""}`
-              : "start the Colab worker from Settings"
+              : "Hosted WAN GPU service"
           }
         />
         <StatusCard
@@ -99,7 +99,7 @@ export default function Dashboard() {
           to="/generate"
           icon={<Clapperboard className="size-5" />}
           title="Generate"
-          desc="Queue a text→video or image→video render on your worker."
+          desc="Upload an image, describe the motion, and generate a real video on the hosted GPU."
         />
         <QuickLink
           to="/library"
@@ -117,7 +117,7 @@ export default function Dashboard() {
           to="/settings"
           icon={<Server className="size-5" />}
           title="Settings"
-          desc="Issue the worker token and start the Colab notebook."
+          desc="Hosted GPU generation is ready — no notebook, token, or local GPU setup."
         />
       </div>
 
