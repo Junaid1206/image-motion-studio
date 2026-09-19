@@ -75,8 +75,8 @@ export function validateJobInput(opts: {
   resolution: string;
 }): string | null {
   if (!opts.prompt.trim()) return "Prompt is required.";
-  if (opts.prompt.length > 2000)
-    return "Prompt is too long (2000 character limit).";
+  if (opts.prompt.length > 600)
+    return "Prompt is too long (600 character limit).";
   if (opts.negativePrompt && opts.negativePrompt.length > 1000)
     return "Negative prompt is too long (1000 character limit).";
   if ((BLOCKED_MODEL_IDS as readonly string[]).includes(opts.model)) {
@@ -89,7 +89,7 @@ export function validateJobInput(opts: {
   if (!ALLOWED_ASPECT_RATIOS.includes(opts.aspectRatio))
     return "Aspect ratio must be 9:16, 16:9 or 1:1.";
   if (!ALLOWED_RESOLUTIONS.includes(opts.resolution))
-    return "Resolution must be 480p or 720p.";
+    return "Resolution must be 480p.";
   return null;
 }
 
