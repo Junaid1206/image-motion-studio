@@ -18,7 +18,7 @@ export const generate = action({
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Sign in required.");
 
-    const job = await ctx.runQuery(internal.hostedGeneration.getJobInternal, {
+    const job = await ctx.runQuery(internal.jobs.getJobInternal, {
       jobId: args.jobId,
     });
     if (!job || job.userId !== userId) throw new Error("Job not found.");
@@ -37,13 +37,13 @@ export const generate = action({
       throw new Error("Hosted GPU is not configured yet. Add HF_TOKEN to the Convex deployment.");
     }
 
-    const sourceUrl = await ctx.runQuery(internal.hostedGeneration.getStorageUrlInternal, {
+    const sourceUrl = await ctx.runQuery(internal.videos.getStorageUrlInternal, {
       storageId: job.inputImageId,
     });
     if (!sourceUrl) throw new Error("Source image URL could not be created.");
 
     const client = await Client.connect(HF_SPACE, {
-      hf_token: hfToken,
+      hf_token: hfToken as `hf_${string}`,
     });
 
     await ctx.runMutation(internal.jobs.setJobStateInternal, {
