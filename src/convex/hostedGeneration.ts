@@ -56,20 +56,43 @@ export const generate = action({
     });
 
     try {
+      // The Space's current public Gradio API expects explicit height/width
+      // (not an aspect_ratio argument) and returns a video FileData object.
+      const [width, height] = args.aspectRatio.split("x").map(Number);
+
       const result = await client.predict("/generate_video", {
         input_image: handle_file(sourceUrl),
         prompt: job.prompt,
-        aspect_ratio: args.aspectRatio,
+        height,
+        width,
         duration_seconds: args.durationSeconds,
+        guidance_scale: 0,
+        steps: 4,
+        seed: 42,
+        randomize_seed: true,
       });
 
       const output = (result.data as unknown[])[0] as
-        | { url?: string; path?: string }
+        | { url?: string; path?: string; name?: string }
         | string
         | undefined;
 
-      const videoUrl = typeof output === "string" ? output : output?.url;
-      if (!videoUrl) throw new Error("Hugging Face returned no generated video.");
+      // Gradio normally returns a remote URL. Keep path/name as fallbacks
+      // because FileData shape can vary between Gradio versions.
+      const videoUrl =
+        typeof output === "string"
+          ? output
+          : output?.url ?? output?.path ?? output?.name;
+
+      if (!videoUrl) {
+        const outputType =
+          output && typeof output === "object"
+            ? Object.keys(output).join(", ")
+            : typeof output;
+        throw new Error(
+          `Hugging Face completed the call but returned no video URL (output: ${outputType}).`,
+        );
+      }
 
       await ctx.runMutation(internal.jobs.setJobStateInternal, {
         id: args.jobId,
