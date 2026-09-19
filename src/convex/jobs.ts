@@ -102,6 +102,7 @@ export const failHostedJob = mutation({
     const userId = await requireUserId(ctx);
     const job = await ctx.db.get(args.id);
     if (!job || job.userId !== userId) throw new Error("Job not found.");
+    if (job.status === "completed" || job.status === "cancelled" || job.status === "failed") return;
     const now = Date.now();
     await ctx.db.patch(args.id, { status: "failed", errorMessage: args.message.slice(0, 1000), updatedAt: now });
     await ctx.db.insert("workerEvents", { jobId: args.id, level: "error", state: "failed", message: args.message.slice(0, 500), at: now });
