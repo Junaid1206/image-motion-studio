@@ -20,7 +20,18 @@ const Datasets = lazy(() => import("./pages/Datasets.tsx"));
 const Jobs = lazy(() => import("./pages/Jobs.tsx"));
 const Settings = lazy(() => import("./pages/Settings.tsx"));
 
-const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL);
+// Convex's browser client uses the deployment URL (.convex.cloud).
+// VLY/Convex HTTP actions use the separate .convex.site hostname.
+// Normalize the latter so an old/downloaded .env.local cannot crash the app.
+const configuredConvexUrl =
+  import.meta.env.VITE_CONVEX_URL?.trim() ||
+  "https://formal-kookabura-53.convex.cloud";
+
+const convexUrl = configuredConvexUrl
+  .replace(/\\.convex\\.site\\/?$/i, ".convex.cloud")
+  .replace(/\\/$/, "");
+
+const convex = new ConvexReactClient(convexUrl);
 
 function ScrollToTop() {
   const { pathname } = useLocation();
