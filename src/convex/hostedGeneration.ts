@@ -72,22 +72,23 @@ export const generate = action({
         randomize_seed: true,
       });
 
+      // The Space returns the video path as the first output and the seed as
+      // the second output. Gradio may serialize FileData as a string path,
+      // a URL, or an object.
       const output = (result.data as unknown[])[0] as
-        | { url?: string; path?: string; name?: string }
+        | { url?: string; path?: string; name?: string; orig_name?: string }
         | string
         | undefined;
 
-      // Gradio normally returns a remote URL. Keep path/name as fallbacks
-      // because FileData shape can vary between Gradio versions.
       const videoUrl =
         typeof output === "string"
           ? output
-          : output?.url ?? output?.path ?? output?.name;
+          : output?.url ?? output?.path;
 
       if (!videoUrl) {
         const rawOutput = JSON.stringify(result.data, null, 2);
         throw new Error(
-          `Hugging Face completed generation but returned an unexpected video output: ${rawOutput.slice(0, 1800)}`,
+          `Hugging Face returned an invalid video output. Raw output: ${rawOutput.slice(0, 1800)}`,
         );
       }
 
