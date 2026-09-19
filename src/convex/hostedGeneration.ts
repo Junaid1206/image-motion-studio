@@ -99,16 +99,23 @@ export const generate = action({
       });
 
       const output = (result.data as unknown[])[0] as
-        | { url?: string; path?: string; name?: string }
+        | {
+            video?: {
+              url?: string;
+              path?: string;
+              name?: string;
+            };
+          }
         | string
         | undefined;
-
-      // Gradio normally returns a remote URL. Keep path/name as fallbacks
-      // because FileData shape can vary between Gradio versions.
+      
       const videoUrl =
         typeof output === "string"
           ? output
-          : output?.url ?? output?.path ?? output?.name;
+          : output?.video?.url ??
+            output?.video?.path ??
+            output?.video?.name;
+
 
       if (!videoUrl) {
         const rawOutput = JSON.stringify(result.data, null, 2);
