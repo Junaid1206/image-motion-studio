@@ -56,20 +56,13 @@ export const generate = action({
     });
 
     try {
-      // The Space's current public Gradio API expects explicit height/width
-      // (not an aspect_ratio argument) and returns a video FileData object.
-      const [width, height] = args.aspectRatio.split("x").map(Number);
-
+      // Verified against the Space's current app.py: the public API accepts
+      // the original aspect_ratio string and returns [video_path, seed].
       const result = await client.predict("/generate_video", {
         input_image: handle_file(sourceUrl),
         prompt: job.prompt,
-        height,
-        width,
+        aspect_ratio: args.aspectRatio,
         duration_seconds: args.durationSeconds,
-        guidance_scale: 0,
-        steps: 4,
-        seed: 42,
-        randomize_seed: true,
       });
 
       // The Space returns the video path as the first output and the seed as
