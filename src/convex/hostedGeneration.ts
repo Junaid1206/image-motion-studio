@@ -1,7 +1,7 @@
 "use node";
 
 import { v } from "convex/values";
-import { action, internalQuery, internalMutation } from "./_generated/server";
+import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { Client, handle_file } from "@gradio/client";
@@ -46,11 +46,12 @@ export const generate = action({
       hf_token: hfToken,
     });
 
-    await ctx.runMutation(internal.jobs.updateJobInternal, {
+    await ctx.runMutation(internal.jobs.setJobStateInternal, {
       id: args.jobId,
       status: "generating",
       progress: 10,
       workerStatus: "Hosted GPU authenticated",
+      eventLevel: "info",
       eventMessage: "Authenticated with Hugging Face and queued generation.",
     });
 
@@ -70,11 +71,12 @@ export const generate = action({
       const videoUrl = typeof output === "string" ? output : output?.url;
       if (!videoUrl) throw new Error("Hugging Face returned no generated video.");
 
-      await ctx.runMutation(internal.jobs.updateJobInternal, {
+      await ctx.runMutation(internal.jobs.setJobStateInternal, {
         id: args.jobId,
         status: "processing",
         progress: 90,
         workerStatus: "Downloading generated MP4",
+        eventLevel: "info",
         eventMessage: "Hosted GPU finished; downloading the generated MP4.",
       });
 
@@ -100,19 +102,5 @@ export const generate = action({
       });
       throw new Error(message);
     }
-  },
-});
-
-export const getJobInternal = internalQuery({
-  args: { jobId: v.id("jobs") },
-  handler: async (ctx, args) => {
-    return await ctx.db.get(args.jobId);
-  },
-});
-
-export const getStorageUrlInternal = internalQuery({
-  args: { storageId: v.id("_storage") },
-  handler: async (ctx, args) => {
-    return await ctx.storage.getUrl(args.storageId);
   },
 });
