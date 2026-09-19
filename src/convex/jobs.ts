@@ -74,6 +74,28 @@ export const markHostedJobRunning = mutation({
   },
 });
 
+export const failHostedJobInternal = internalMutation({
+  args: { id: v.id("jobs"), message: v.string() },
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.id);
+    if (!job) throw new Error("Job not found.");
+    if (job.status === "completed" || job.status === "cancelled") return;
+    const now = Date.now();
+    await ctx.db.patch(args.id, {
+      status: "failed",
+      errorMessage: args.message.slice(0, 1000),
+      updatedAt: now,
+    });
+    await ctx.db.insert("workerEvents", {
+      jobId: args.id,
+      level: "error",
+      state: "failed",
+      message: args.message.slice(0, 500),
+      at: now,
+    });
+  },
+});
+
 export const failHostedJob = mutation({
   args: { id: v.id("jobs"), message: v.string() },
   handler: async (ctx, args) => {
