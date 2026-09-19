@@ -84,6 +84,59 @@ export const generateUploadUrl = mutation({
 
 // Finalize a hosted GPU job from the browser after the generated MP4 has
 // been uploaded to Convex storage. The job owner is checked server-side.
+export const completeHostedJobInternal = internalMutation({
+  args: { jobId: v.id("jobs"), videoStorageId: v.id("_storage") },
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (!job) throw new Error("Job not found.");
+    if (job.status === "cancelled") {
+      await ctx.storage.delete(args.videoStorageId);
+      throw new Error("Job was cancelled.");
+    }
+    if (job.status === "completed") {
+      await ctx.storage.delete(args.videoStorageId);
+      return job.videoId;
+    }
+
+    const now = Date.now();
+    const videoId = await ctx.db.insert("videos", {
+      userId: job.userId,
+      type: job.type,
+      prompt: job.prompt,
+      negativePrompt: job.negativePrompt,
+      videoStorageId: args.videoStorageId,
+      model: job.model,
+      provider: "hosted",
+      jobId: args.jobId,
+      durationSeconds: job.settings.durationSeconds,
+      aspectRatio: job.settings.aspectRatio,
+      resolution: job.settings.resolution,
+      seed: job.settings.seed,
+      sourceImageId: job.inputImageId,
+      status: "completed",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await ctx.db.patch(args.jobId, {
+      status: "completed",
+      progress: 100,
+      videoId,
+      workerStatus: "hosted GPU complete",
+      completedAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.insert("workerEvents", {
+      jobId: args.jobId,
+      level: "info",
+      state: "completed",
+      message: "Hosted GPU generation completed and the MP4 was saved to Library.",
+      at: now,
+    });
+    return videoId;
+  },
+});
+
 export const completeHostedJob = mutation({
   args: { jobId: v.id("jobs"), videoStorageId: v.id("_storage") },
   handler: async (ctx, args) => {
