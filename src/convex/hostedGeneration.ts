@@ -11,16 +11,8 @@ const HF_SPACE = "alexcheng0072/wan27-free-video-generator";
 export const generate = action({
   args: {
     jobId: v.id("jobs"),
-    aspectRatio: v.union(
-      v.literal("832x480"),
-      v.literal("480x832"),
-      v.literal("640x640"),
-    ),
-    durationSeconds: v.union(
-      v.literal(2),
-      v.literal(3),
-      v.literal(5),
-    ),
+    aspectRatio: v.string(),
+    durationSeconds: v.number(),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -32,6 +24,13 @@ export const generate = action({
     if (!job || job.userId !== userId) throw new Error("Job not found.");
     if (!job.inputImageId) throw new Error("Source image not found.");
     if (job.status === "cancelled") throw new Error("Generation cancelled.");
+
+    if (!["832x480", "480x832", "640x640"].includes(args.aspectRatio)) {
+      throw new Error("Invalid aspect ratio.");
+    }
+    if (![2, 3, 5].includes(args.durationSeconds)) {
+      throw new Error("Invalid duration.");
+    }
 
     const hfToken = process.env.HF_TOKEN;
     if (!hfToken) {
