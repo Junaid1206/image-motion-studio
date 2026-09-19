@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import {
   requireUserId,
   assertOwner,
@@ -43,6 +43,11 @@ export const getVideo = query({
 });
 
 // Short-lived URL for a stored video or image.
+export const getStorageUrlInternal = internalQuery({
+  args: { storageId: v.id("_storage") },
+  handler: async (ctx, args) => await ctx.storage.getUrl(args.storageId),
+});
+
 export const getStorageUrl = query({
   args: { storageId: v.id("_storage") },
   handler: async (ctx, args) => {
