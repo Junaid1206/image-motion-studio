@@ -85,12 +85,9 @@ export const generate = action({
           : output?.url ?? output?.path ?? output?.name;
 
       if (!videoUrl) {
-        const outputType =
-          output && typeof output === "object"
-            ? Object.keys(output).join(", ")
-            : typeof output;
+        const rawOutput = JSON.stringify(result.data, null, 2);
         throw new Error(
-          `Hugging Face completed the call but returned no video URL (output: ${outputType}).`,
+          `Hugging Face completed generation but returned an unexpected video output: ${rawOutput.slice(0, 1800)}`,
         );
       }
 
