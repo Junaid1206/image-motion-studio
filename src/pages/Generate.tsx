@@ -1,4 +1,3 @@
-import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
@@ -16,8 +15,8 @@ import {
 } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
+import { useAction, useQuery, useMutation } from "convex/react";
 import { useRef, useState } from "react";
-import { Client, handle_file } from "@gradio/client";
 import {
   Ban,
   CheckCircle2,
@@ -51,7 +50,7 @@ export default function Generate() {
   const createJob = useMutation(api.jobs.createJob);
   const markHostedJobRunning = useMutation(api.jobs.markHostedJobRunning);
   const failHostedJob = useMutation(api.jobs.failHostedJob);
-  const completeHostedJob = useMutation(api.videos.completeHostedJob);
+  const runHostedGeneration = useAction(api.hostedGeneration.generate);
   const cancelJob = useMutation(api.jobs.cancelJob);
 
   const [prompt, setPrompt] = useState("");
@@ -127,51 +126,17 @@ export default function Generate() {
       await markHostedJobRunning({ id: jobId });
       toast.info("GPU generation started…");
 
-      const client = await Client.connect("alexcheng0072/wan27-free-video-generator");
       const ratio =
         aspect === "16:9" ? "832x480" :
         aspect === "1:1" ? "640x640" :
         "480x832";
 
-      // Gradio JS client's current API exposes predict() as the blocking call.
-      // submit() returns an async iterator, so awaiting submission.result() is invalid.
-      const result = await client.predict("/generate_video", {
-        input_image: handle_file(imageFile!),
-        prompt: prompt.trim(),
-        aspect_ratio: ratio,
-        duration_seconds: Number(duration),
-      });
-
-      const output = (result.data as unknown[])[0] as
-        | { url?: string; path?: string }
-        | string;
-
-      const videoUrl = typeof output === "string" ? output : output?.url;
-      if (!videoUrl) throw new Error("Hosted GPU returned no video file.");
-
-      const videoRes = await fetch(videoUrl);
-      if (!videoRes.ok) {
-        throw new Error(`Generated video download failed (${videoRes.status}).`);
-      }
-
-      const videoBlob = await videoRes.blob();
-      const videoUploadUrl = await generateUploadUrl();
-      const videoUpload = await fetch(videoUploadUrl, {
-        method: "POST",
-        headers: { "Content-Type": "video/mp4" },
-        body: videoBlob,
-      });
-
-      if (!videoUpload.ok) {
-        throw new Error(`Video upload failed (${videoUpload.status}).`);
-      }
-
-      const { storageId: videoStorageId } =
-        (await videoUpload.json()) as { storageId: string };
-
-      await completeHostedJob({
+      // The Hugging Face token stays server-side in Convex. The browser never
+      // receives it or calls the ZeroGPU Space directly.
+      await runHostedGeneration({
         jobId,
-        videoStorageId: videoStorageId as Id<"_storage">,
+        aspectRatio: ratio,
+        durationSeconds: Number(duration),
       });
 
       toast.success("Video generated and saved to Library.");
