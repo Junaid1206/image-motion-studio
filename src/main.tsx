@@ -28,8 +28,8 @@ const configuredConvexUrl =
   "https://formal-kookabura-53.convex.cloud";
 
 const convexUrl = configuredConvexUrl
-  .replace(/\\.convex\\.site\\/?$/i, ".convex.cloud")
-  .replace(/\\/$/, "");
+  .replace(/\.convex\.site\/?$/i, ".convex.cloud")
+  .replace(/\/$/, "");
 
 const convex = new ConvexReactClient(convexUrl);
 
