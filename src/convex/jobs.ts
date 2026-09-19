@@ -303,6 +303,11 @@ export const claimJobInternal = internalMutation({
   },
 });
 
+export const getJobInternal = internalQuery({
+  args: { jobId: v.id("jobs") },
+  handler: async (ctx, args) => await ctx.db.get(args.jobId),
+});
+
 export const getJobByKeyInternal = internalQuery({
   args: { workerJobKey: v.string() },
   handler: async (ctx, args) => {
