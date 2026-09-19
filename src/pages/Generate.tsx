@@ -133,14 +133,15 @@ export default function Generate() {
         aspect === "1:1" ? "640x640" :
         "480x832";
 
-      const submission = await client.submit("/generate_video", {
-        input_image: await handle_file(imageFile!),
+      // Gradio JS client's current API exposes predict() as the blocking call.
+      // submit() returns an async iterator, so awaiting submission.result() is invalid.
+      const result = await client.predict("/generate_video", {
+        input_image: handle_file(imageFile!),
         prompt: prompt.trim(),
         aspect_ratio: ratio,
         duration_seconds: Number(duration),
       });
 
-      const result = await submission.result();
       const output = (result.data as unknown[])[0] as
         | { url?: string; path?: string }
         | string;
